@@ -199,6 +199,18 @@ gc_list_merge(PyGC_Head *from, PyGC_Head *to)
 }
 
 static Py_ssize_t
+gc_list_memory(PyGC_Head *list)
+{
+    PyGC_Head *gc;
+    Py_ssize_t memory = 0;
+    for (gc = list->gc.gc_next; gc != list; gc = gc->gc.gc_next) {
+        PyObject *op = FROM_GC(gc);
+        memory += _PySys_GetSizeOf(op);
+    }
+    return memory;
+}
+
+static Py_ssize_t
 gc_list_size(PyGC_Head *list)
 {
     PyGC_Head *gc;
@@ -810,12 +822,16 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     struct gc_generation_stats *stats = &_PyRuntime.gc.generation_stats[generation];
 
     if (_PyRuntime.gc.debug & DEBUG_STATS) {
+        PySys_WriteStderr("gc: time %.7f\n", _PyTime_AsSecondsDouble(_PyTime_GetSystemClock()));
         PySys_WriteStderr("gc: collecting generation %d...\n",
                           generation);
         PySys_WriteStderr("gc: objects in each generation:");
         for (i = 0; i < NUM_GENERATIONS; i++)
             PySys_FormatStderr(" %zd",
                               gc_list_size(GEN_HEAD(i)));
+        PySys_WriteStderr("\ngc: memory in each generation before:");
+        for (i = 0; i < NUM_GENERATIONS; i++)
+            PySys_FormatStderr(" %zd", gc_list_memory(GEN_HEAD(i)));
         PySys_WriteStderr("\ngc: objects in permanent generation: %zd",
                          gc_list_size(&_PyRuntime.gc.permanent_generation.head));
         t1 = _PyTime_GetMonotonicClock();
@@ -934,8 +950,12 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
             PySys_FormatStderr(
                 "gc: done, %zd unreachable, %zd uncollectable",
                 n+m, n);
-        PySys_WriteStderr(", %.4fs elapsed\n",
+        PySys_WriteStderr(", %.7fs elapsed",
                           _PyTime_AsSecondsDouble(t2 - t1));
+        PySys_WriteStderr("\ngc: memory in each generation after:");
+        for (i = 0; i < NUM_GENERATIONS; i++)
+            PySys_FormatStderr(" %zd", gc_list_memory(GEN_HEAD(i)));
+        PySys_WriteStderr("\n");
     }
 
     /* Append instances in the uncollectable set to a Python
