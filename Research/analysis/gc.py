@@ -1,5 +1,5 @@
-from collections import namedtuple
 import sys
+from collections import namedtuple
 
 Entry = namedtuple('Entry', ['time', 'generation', 'objects', 'bytes_before', 'elapsed', 'bytes_after'])
 
@@ -20,11 +20,13 @@ def analyze(filename):
         )
         trace.append(entry)
 
-    total_gc_time = sum(entry.elapsed for entry in trace)
-    print('Total GC time: {}s'.format(total_gc_time))
+    # total_gc_time = sum(entry.elapsed for entry in trace)
+    # print('Total GC time: {}s'.format(total_gc_time))
 
     average_memory_collected = sum(sum(entry.bytes_before) - sum(entry.bytes_after) for entry in trace) / len(trace)
-    print('Average Memory Collected: {}kB'.format(average_memory_collected / 1024))
+    print('Average Memory Collected: {}'.format(average_memory_collected))
+
+    print('Collections: {}'.format(len(trace)))
 
 
 if __name__ == '__main__':

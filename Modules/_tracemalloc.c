@@ -148,6 +148,8 @@ static _Py_hashtable_t *tracemalloc_tracebacks = NULL;
    Protected by TABLES_LOCK(). */
 static _Py_hashtable_t *tracemalloc_traces = NULL;
 
+static size_t data_points = 0;
+
 
 #ifdef TRACE_DEBUG
 static void
@@ -652,6 +654,8 @@ tracemalloc_add_trace(unsigned int domain, uintptr_t ptr,
 
     assert(tracemalloc_traced_memory <= SIZE_MAX - size);
     tracemalloc_traced_memory += size;
+    data_points++;
+    fprintf(stderr, "%zu\n", tracemalloc_traced_memory);
     if (tracemalloc_traced_memory > tracemalloc_peak_traced_memory)
         tracemalloc_peak_traced_memory = tracemalloc_traced_memory;
     return 0;
@@ -1037,6 +1041,7 @@ tracemalloc_deinit(void)
     if (tracemalloc_config.initialized != TRACEMALLOC_INITIALIZED)
         return;
     tracemalloc_config.initialized = TRACEMALLOC_FINALIZED;
+    fprintf(stderr, "%zu\n", data_points);
 
     tracemalloc_stop();
 
