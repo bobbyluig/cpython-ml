@@ -105,6 +105,26 @@ struct gc_generation_stats {
     Py_ssize_t collected;
     /* total number of uncollectable objects (put into gc.garbage) */
     Py_ssize_t uncollectable;
+    /* the number of objects in this generation */
+    Py_ssize_t size;
+};
+
+/* Stats for the learning garbage collector. */
+struct gc_learning_stats {
+    /* The number of objects in each generation. */
+    uint64_t size[NUM_GENERATIONS];
+    /* The number of allocations for the generation 0 and the collections of generation n-1 for generation n. */
+    uint64_t count[NUM_GENERATIONS];
+    /* The number of objects collected in the last collection of each generation. */
+    uint64_t collected[NUM_GENERATIONS];
+    /* The last generation collected. This value is NUM_GENERATIONS+1 when no collections have been run. */
+    uint64_t generation;
+    /* The file whose bytecode is being execute. */
+    uint64_t file;
+    /* The instruction index being executed. */
+    uint64_t instruction;
+    /* The total memory usage in bytes. */
+    uint64_t memory;
 };
 
 struct _gc_runtime_state {

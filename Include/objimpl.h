@@ -254,6 +254,7 @@ typedef union _gc_head {
         union _gc_head *gc_next;
         union _gc_head *gc_prev;
         Py_ssize_t gc_refs;
+        int generation;
     } gc;
     long double dummy;  /* force worst-case alignment */
     // malloc returns memory block aligned for any built-in types and
@@ -261,8 +262,6 @@ typedef union _gc_head {
     // On amd64 linux, long double requires 16 byte alignment.
     // See bpo-27987 for more discussion.
 } PyGC_Head;
-
-extern PyGC_Head *_PyGC_generation0;
 
 #define _Py_AS_GC(o) ((PyGC_Head *)(o)-1)
 
@@ -305,6 +304,8 @@ extern PyGC_Head *_PyGC_generation0;
     g->gc.gc_prev = _PyGC_generation0->gc.gc_prev; \
     g->gc.gc_prev->gc.gc_next = g; \
     _PyGC_generation0->gc.gc_prev = g; \
+    g->gc.generation = 0; \
+    _PyRuntime.gc.generation_stats[0].size++; \
     } while (0);
 
 /* Tell the GC to stop tracking this object.
@@ -318,6 +319,7 @@ extern PyGC_Head *_PyGC_generation0;
     g->gc.gc_prev->gc.gc_next = g->gc.gc_next; \
     g->gc.gc_next->gc.gc_prev = g->gc.gc_prev; \
     g->gc.gc_next = NULL; \
+    _PyRuntime.gc.generation_stats[g->gc.generation].size--; \
     } while (0);
 
 /* True if the object is currently tracked by the GC. */

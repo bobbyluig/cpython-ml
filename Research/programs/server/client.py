@@ -1,10 +1,11 @@
 import threading
+import time
 
 import requests
 
 lock = threading.Lock()
 i = 0
-target = 5000
+target = 1000
 
 
 def run():
@@ -15,12 +16,13 @@ def run():
             if i == target:
                 return
             i += 1
-            print('{0:.3f}'.format(i / 5000), end='\r')
+            print('{0:.3f}'.format(i / target), end='\r')
 
         requests.get('http://localhost:5000/')
 
 
 threads = []
+start = time.time()
 
 for _ in range(128):
     t = threading.Thread(target=run)
@@ -29,3 +31,5 @@ for _ in range(128):
 
 for t in threads:
     t.join()
+
+print(target / (time.time() - start))

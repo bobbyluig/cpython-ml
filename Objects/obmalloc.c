@@ -1,11 +1,14 @@
 #include "Python.h"
 
 #include <stdbool.h>
+#include <malloc.h>
 
 
 /* Defined in tracemalloc.c */
 extern void _PyMem_DumpTraceback(int fd, const void *ptr);
 
+/* Defined in gcmodule.c */
+extern size_t memory;
 
 /* Python's malloc wrappers (see pymem.h) */
 
@@ -89,7 +92,9 @@ _PyMem_RawMalloc(void *ctx, size_t size)
        To solve these problems, allocate an extra byte. */
     if (size == 0)
         size = 1;
-    return malloc(size);
+    void* ptr = malloc(size);
+    memory += malloc_usable_size(ptr);
+    return ptr;
 }
 
 static void *
@@ -103,7 +108,9 @@ _PyMem_RawCalloc(void *ctx, size_t nelem, size_t elsize)
         nelem = 1;
         elsize = 1;
     }
-    return calloc(nelem, elsize);
+    void* ptr = calloc(nelem, elsize);
+    memory += malloc_usable_size(ptr);
+    return ptr;
 }
 
 static void *
@@ -111,12 +118,16 @@ _PyMem_RawRealloc(void *ctx, void *ptr, size_t size)
 {
     if (size == 0)
         size = 1;
-    return realloc(ptr, size);
+    memory -= malloc_usable_size(ptr);
+    ptr = realloc(ptr, size);
+    memory += malloc_usable_size(ptr);
+    return ptr;
 }
 
 static void
 _PyMem_RawFree(void *ctx, void *ptr)
 {
+    memory -= malloc_usable_size(ptr);
     free(ptr);
 }
 
@@ -1411,6 +1422,7 @@ pymalloc_alloc(void *ctx, size_t nbytes)
      * Most frequent paths first
      */
     size = (uint)(nbytes - 1) >> ALIGNMENT_SHIFT;
+    memory += INDEX2SIZE(size);
     pool = usedpools[size + size];
     if (pool != pool->nextpool) {
         /*
@@ -1634,7 +1646,7 @@ pymalloc_free(void *ctx, void *p)
         return 0;
     }
     /* We allocated this address. */
-
+    memory -= INDEX2SIZE(pool->szidx);
     LOCK();
 
     /* Link p to the start of the pool's freeblock list.  Since

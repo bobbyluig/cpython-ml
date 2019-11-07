@@ -325,4 +325,40 @@ gc_get_freeze_count(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
+
+PyDoc_STRVAR(gc_get_size__doc__,
+             "get_size($module, /)\n"
+             "--\n"
+             "\n"
+             "Return a three-tuple of the current generation sizes.");
+
+#define GC_GET_SIZE_METHODDEF    \
+    {"get_size", (PyCFunction)gc_get_size, METH_NOARGS, gc_get_size__doc__},
+
+static PyObject *
+gc_get_size_impl(PyObject *module);
+
+static PyObject *
+gc_get_size(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    return gc_get_size_impl(module);
+}
+
+PyDoc_STRVAR(gc_get_memory__doc__,
+             "get_memory($module, /)\n"
+             "--\n"
+             "\n"
+             "Return the memory usage in bytes.");
+
+#define GC_GET_MEMORY_METHODDEF    \
+    {"get_memory", (PyCFunction)gc_get_memory, METH_NOARGS, gc_get_memory__doc__},
+
+static Py_ssize_t
+gc_get_memory_impl(PyObject *module);
+
+static PyObject *
+gc_get_memory(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    return PyLong_FromSsize_t(gc_get_memory_impl(module));
+}
 /*[clinic end generated code: output=21dc9270b10b7891 input=a9049054013a1b77]*/

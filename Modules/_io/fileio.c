@@ -18,6 +18,9 @@
 #include <stddef.h> /* For offsetof */
 #include "_iomodule.h"
 
+#include "internal/mem.h"
+#include "internal/pystate.h"
+
 /*
  * Known likely problems:
  *
