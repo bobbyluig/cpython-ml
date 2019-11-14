@@ -15,7 +15,7 @@ _data = [[] for _ in range(1000000)]
 
 # 108.79300753927068/35.338132730735744
 count = 0
-MANUAL_GC = True
+MANUAL_GC = False
 
 
 @app.route('/')

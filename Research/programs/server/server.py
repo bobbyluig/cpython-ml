@@ -22,12 +22,13 @@ app = Flask(__name__)
 
 @app.route('/')
 def hello_world():
+    print(gc.get_count())
     return 'Hello World!'
 
 
 if __name__ == '__main__':
-    # gc.disable()
-    gc.set_threshold(700, 10, 10)
+    gc.disable()
+    # gc.set_threshold(700, 10, 10)
     # gc.set_debug(gc.DEBUG_STATS)
 
     log = logging.getLogger('werkzeug')

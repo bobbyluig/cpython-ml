@@ -4,6 +4,9 @@
 #include "code.h"
 #include "structmember.h"
 
+/* Counter for id */
+static uint64_t global_id = 0;
+
 /* Holder for co_extra information */
 typedef struct {
     Py_ssize_t ce_size;
@@ -195,8 +198,10 @@ PyCode_New(int argcount, int kwonlyargcount,
     co->co_nlocals = nlocals;
     co->co_stacksize = stacksize;
     co->co_flags = flags;
+    co->co_id = global_id;
     Py_INCREF(code);
     co->co_code = code;
+    global_id += PyBytes_GET_SIZE(co->co_code) / sizeof(_Py_CODEUNIT);
     Py_INCREF(consts);
     co->co_consts = consts;
     Py_INCREF(names);

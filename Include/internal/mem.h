@@ -119,8 +119,8 @@ struct gc_learning_stats {
     uint64_t collected[NUM_GENERATIONS];
     /* The last generation collected. This value is NUM_GENERATIONS+1 when no collections have been run. */
     uint64_t generation;
-    /* The file whose bytecode is being execute. */
-    uint64_t file;
+    /* The code object whose bytecode is being execute. */
+    uint64_t code;
     /* The instruction index being executed. */
     uint64_t instruction;
     /* The total memory usage in bytes. */
@@ -142,6 +142,7 @@ struct _gc_runtime_state {
     /* a permanent generation which won't be collected */
     struct gc_generation permanent_generation;
     struct gc_generation_stats generation_stats[NUM_GENERATIONS];
+    struct gc_learning_stats learning_stats;
     /* true if we are currently running the collector */
     int collecting;
     /* list of uncollectable objects */

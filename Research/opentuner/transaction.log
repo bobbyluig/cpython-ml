@@ -1,0 +1,59 @@
+Located 20 possible collection points.
+[     9s]    INFO opentuner.search.plugin.DisplayPlugin: tests=11, best {'generation': 2, 'instruction': 21778, 'modulo': 12}, cost time=1000000000001250816.0000, found by NormalGreedyMutation
+[    14s]    INFO opentuner.search.plugin.DisplayPlugin: tests=27, best {'generation': 2, 'instruction': 21776, 'modulo': 43}, cost time=1000000000000326272.0000, found by NormalGreedyMutation
+[    19s]    INFO opentuner.search.plugin.DisplayPlugin: tests=35, best {'generation': 2, 'instruction': 21776, 'modulo': 43}, cost time=1000000000000326272.0000, found by NormalGreedyMutation
+[    24s]    INFO opentuner.search.plugin.DisplayPlugin: tests=51, best {'generation': 2, 'instruction': 21776, 'modulo': 50}, cost time=1000000000000285312.0000, found by NormalGreedyMutation
+[    29s]    INFO opentuner.search.plugin.DisplayPlugin: tests=61, best {'generation': 2, 'instruction': 21776, 'modulo': 50}, cost time=1000000000000285312.0000, found by NormalGreedyMutation
+[    34s]    INFO opentuner.search.plugin.DisplayPlugin: tests=76, best {'generation': 2, 'instruction': 21776, 'modulo': 50}, cost time=1000000000000285312.0000, found by NormalGreedyMutation
+[    40s]    INFO opentuner.search.plugin.DisplayPlugin: tests=90, best {'generation': 2, 'instruction': 21776, 'modulo': 50}, cost time=1000000000000285312.0000, found by NormalGreedyMutation
+[    45s]    INFO opentuner.search.plugin.DisplayPlugin: tests=102, best {'generation': 0, 'instruction': 21706, 'modulo': 5}, cost time=47811.0000, found by DifferentialEvolutionAlt
+[    51s]    INFO opentuner.search.plugin.DisplayPlugin: tests=119, best {'generation': 0, 'instruction': 21706, 'modulo': 6}, cost time=47679.0000, found by NormalGreedyMutation
+[    56s]    INFO opentuner.search.plugin.DisplayPlugin: tests=132, best {'generation': 0, 'instruction': 21706, 'modulo': 6}, cost time=47679.0000, found by NormalGreedyMutation
+[    61s]    INFO opentuner.search.plugin.DisplayPlugin: tests=139, best {'generation': 1, 'instruction': 21706, 'modulo': 6}, cost time=47679.0000, found by NormalGreedyMutation,NormalGreedyMutation
+[    68s]    INFO opentuner.search.plugin.DisplayPlugin: tests=149, best {'generation': 1, 'instruction': 21706, 'modulo': 19}, cost time=47283.0000, found by NormalGreedyMutation
+[    73s]    INFO opentuner.search.plugin.DisplayPlugin: tests=159, best {'generation': 1, 'instruction': 21706, 'modulo': 19}, cost time=47283.0000, found by NormalGreedyMutation
+[    78s]    INFO opentuner.search.plugin.DisplayPlugin: tests=170, best {'generation': 0, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation
+[    86s]    INFO opentuner.search.plugin.DisplayPlugin: tests=187, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation
+[    93s]    INFO opentuner.search.plugin.DisplayPlugin: tests=200, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation
+[   100s]    INFO opentuner.search.plugin.DisplayPlugin: tests=210, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation
+[   105s]    INFO opentuner.search.plugin.DisplayPlugin: tests=221, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation
+[   112s]    INFO opentuner.search.plugin.DisplayPlugin: tests=235, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation
+[   118s]    INFO opentuner.search.plugin.DisplayPlugin: tests=245, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation
+[   124s]    INFO opentuner.search.plugin.DisplayPlugin: tests=257, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation
+[   130s]    INFO opentuner.search.plugin.DisplayPlugin: tests=272, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation
+[   136s]    INFO opentuner.search.plugin.DisplayPlugin: tests=282, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation
+[   142s]    INFO opentuner.search.plugin.DisplayPlugin: tests=288, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,UniformGreedyMutation
+[   148s]    INFO opentuner.search.plugin.DisplayPlugin: tests=297, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,UniformGreedyMutation
+[   154s]    INFO opentuner.search.plugin.DisplayPlugin: tests=302, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,UniformGreedyMutation
+[   159s]    INFO opentuner.search.plugin.DisplayPlugin: tests=312, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,UniformGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGr
+eedyMutation
+[   164s]    INFO opentuner.search.plugin.DisplayPlugin: tests=319, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,UniformGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGr
+eedyMutation
+[   170s]    INFO opentuner.search.plugin.DisplayPlugin: tests=329, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,UniformGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGr
+eedyMutation,NormalGreedyMutation
+[   175s]    INFO opentuner.search.plugin.DisplayPlugin: tests=340, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,UniformGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGr
+eedyMutation,NormalGreedyMutation,UniformGreedyMutation
+[   179s]    INFO opentuner.search.metatechniques: AUCBanditMetaTechniqueA: [('NormalGreedyMutation', 406), ('DifferentialEvolutionAlt', 45), ('UniformGreedyMutation', 33), ('RandomNelderMead', 17)]
+[   181s]    INFO opentuner.search.plugin.DisplayPlugin: tests=350, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,UniformGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGr
+eedyMutation,NormalGreedyMutation,UniformGreedyMutation,UniformGreedyMutation
+[   183s]    INFO opentuner.search.plugin.DisplayPlugin: tests=357, best {'generation': 1, 'instruction': 21706, 'modulo': 17}, cost time=47167.0000, found by NormalGreedyMutation,NormalGreedyMutation,NormalGre
+edyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,UniformGreedyMutation,NormalGreedyMutation,NormalGreedyMutation,NormalGr
+eedyMutation,NormalGreedyMutation,UniformGreedyMutation,UniformGreedyMutation
+Optimal values written to optimal.json: {'generation': 0, 'instruction': 21706, 'modulo': 17}
+Default strategy: 5501848 70963
+Optimal strategy: 5212840 47167
+Pareto dominant solution found.

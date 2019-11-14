@@ -31,6 +31,7 @@
 #include "frameobject.h"        /* for PyFrame_ClearFreeList */
 #include "pydtrace.h"
 #include "pytime.h"             /* for _PyTime_GetMonotonicClock() */
+#include "hashtable.h"
 
 /*[clinic input]
 module gc
@@ -49,6 +50,19 @@ static PyObject *gc_str = NULL;
 /* Memory usage for learning GC. */
 size_t memory = 0;
 
+/* Dictionary to keep track of instruction hit count. */
+_Py_hashtable_t *hit_counts = NULL;
+
+/* Parameters for tuning. */
+static uint64_t parameter_instruction = 0;
+static uint64_t parameter_modulo = 0;
+static uint64_t parameter_generation = 0;
+static uint64_t parameter_verbose = 0;
+
+/* Tuning statistics */
+static uint64_t tuning_memory = 0;
+static uint64_t tuning_objects = 0;
+
 /* set for debugging information */
 #define DEBUG_STATS             (1<<0) /* print collection statistics */
 #define DEBUG_COLLECTABLE       (1<<1) /* print collectable objects */
@@ -59,6 +73,28 @@ size_t memory = 0;
                 DEBUG_SAVEALL
 
 #define GEN_HEAD(n) (&_PyRuntime.gc.generations[n].head)
+
+static Py_uhash_t
+hashtable_hash_uint64_t(_Py_hashtable_t *ht, const void *pkey)
+{
+    uint64_t value;
+
+    _Py_HASHTABLE_READ_KEY(ht, pkey, value);
+
+    return value;
+}
+
+static int
+hashtable_compare_uint64_t(_Py_hashtable_t *ht, const void *pkey,
+                            const _Py_hashtable_entry_t *entry)
+{
+    uint64_t int1, int2;
+
+    _Py_HASHTABLE_READ_KEY(ht, pkey, int1);
+    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, int2);
+
+    return int1 == int2;
+}
 
 void
 _PyGC_Initialize(struct _gc_runtime_state *state)
@@ -87,6 +123,32 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
         };
         state->generation_stats[i] = generation_stats;
     };
+
+    const char *instruction = Py_GETENV("RESEARCH_INSTRUCTION");
+    const char *modulo = Py_GETENV("RESEARCH_MODULO");
+    const char *generation = Py_GETENV("RESEARCH_GENERATION");
+    const char *verbose = Py_GETENV("RESEARCH_VERBOSE");
+    parameter_instruction = (instruction != NULL) ? atol(instruction) : 0;
+    parameter_modulo = (modulo != NULL) ? atol(modulo) : 0;
+    parameter_generation = (generation != NULL) ? atol(generation) : 0;
+    parameter_verbose = (verbose != NULL) ? atol(verbose) : 0;
+
+    if (parameter_verbose) {
+        hit_counts = _Py_hashtable_new(sizeof(uint64_t), sizeof(uint64_t),
+                                       hashtable_hash_uint64_t, hashtable_compare_uint64_t);
+    }
+
+    struct gc_learning_stats learning_stats = {};
+    for (int i = 0; i < NUM_GENERATIONS; i++) {
+        learning_stats.size[i] = 0;
+        learning_stats.count[i] = 0;
+        learning_stats.collected[i] = 0;
+    };
+    learning_stats.generation = NUM_GENERATIONS;
+    learning_stats.code = 0;
+    learning_stats.instruction = 0;
+    learning_stats.memory = 0;
+    state->learning_stats = learning_stats;
 }
 
 /*--------------------------------------------------------------------------
@@ -814,41 +876,40 @@ clear_freelists(void)
     (void)PyContext_ClearFreeList();
 }
 
-/* Method to compute stats for learning GC. */
-static struct gc_learning_stats
-get_learning_stats() {
-    struct gc_learning_stats stats = {};
+/* Method for learning GC to determine which generation to collect, or -1 for no collection. */
+static int _Py_HOT_FUNCTION
+learning_predict(struct gc_learning_stats stats) {
+    /* The number of times the target bytecode has been hit. */
+    static uint64_t hit = 0;
 
-    for (int i = 0; i < NUM_GENERATIONS; i++) {
-        stats.count[i] = _PyRuntime.gc.generations[i].count;
+    /* Update hit counter appropriately. */
+    if (stats.instruction == parameter_instruction) {
+        hit++;
     }
 
-    return stats;
-}
+    /* Update the maximum memory. */
+    tuning_memory = Py_MAX(tuning_memory, stats.memory);
 
-/* Method for learning GC to determine which generation to collect, or -1 for no collection. */
-static int
-learning_predict(struct gc_learning_stats stats) {
+    /* Don't use special policy if the modulo is not defined. */
+    if (parameter_modulo != 0) {
+        /* Should we collect? */
+        if (hit == parameter_modulo) {
+            hit = 0;
+            return parameter_generation;
+        } else {
+            return -1;
+        }
+    }
+
     /* If the count of generation 0 does not exceed the threshold, do nothing. */
     if (stats.count[0] <= _PyRuntime.gc.generations[0].threshold) {
         return -1;
     }
 
-    /* Compute parameters from statistics. */
-    Py_ssize_t long_lived_pending = 0;
-    Py_ssize_t long_lived_total = 0;
-    for (int i = 1; i < NUM_GENERATIONS; i++) {
-        if (i == NUM_GENERATIONS - 1) {
-            long_lived_total += stats.size[i];
-        } else {
-            long_lived_pending += stats.size[i];
-        }
-    }
-
     /* Determine which generation to collect. */
     for (int i = NUM_GENERATIONS - 1; i >= 1; i--) {
         if (stats.count[i] > _PyRuntime.gc.generations[i].threshold) {
-            if (i == NUM_GENERATIONS - 1 && long_lived_pending < long_lived_total / 4) {
+            if (i == NUM_GENERATIONS - 1 && _PyRuntime.gc.long_lived_pending < _PyRuntime.gc.long_lived_total / 4) {
                 continue;
             }
             return i;
@@ -862,7 +923,28 @@ learning_predict(struct gc_learning_stats stats) {
 /* Method for learning GC to be rewarded after collection. */
 static void
 learning_reward(struct gc_learning_stats before, struct gc_learning_stats after) {
-    // TODO
+    /* Update the total number of objects scanned. */
+    for (int i = 0; i <= after.generation; i++) {
+        tuning_objects += before.size[i];
+    }
+}
+
+/* Update learning stats. */
+static void _Py_HOT_FUNCTION
+update_learning_stats() {
+    for (int i = 0; i < NUM_GENERATIONS; i++) {
+        _PyRuntime.gc.learning_stats.count[i] = _PyRuntime.gc.generations[i].count;
+        _PyRuntime.gc.learning_stats.size[i] = _PyRuntime.gc.generation_stats[i].size;
+    }
+    _PyRuntime.gc.learning_stats.memory = memory;
+     PyThreadState *tstate = PyThreadState_GET();
+     if (tstate->frame != NULL) {
+         _PyRuntime.gc.learning_stats.code = tstate->frame->f_code->co_id;
+         if (tstate->frame->f_lasti >= 0) {
+             _PyRuntime.gc.learning_stats.instruction = tstate->frame->f_code->co_id +
+                     tstate->frame->f_lasti / sizeof(_Py_CODEUNIT);
+         }
+     }
 }
 
 /* This is the main function.  Read this to understand how the
@@ -882,6 +964,9 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     _PyTime_t t1 = 0;   /* initialize to prevent a compiler warning */
 
     struct gc_generation_stats *stats = &_PyRuntime.gc.generation_stats[generation];
+
+    /* Take a snapshot of learning stats before collection. */
+    struct gc_learning_stats learning_before = _PyRuntime.gc.learning_stats;
 
     if (_PyRuntime.gc.debug & DEBUG_STATS) {
         PySys_WriteStderr("gc: time %.7f\n", _PyTime_AsSecondsDouble(_PyTime_GetSystemClock()));
@@ -951,28 +1036,19 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
         gc->gc.generation = next_generation;
     }
 
-    /* Everything in unreachable should be removed from its generation. */
-    for (gc = unreachable.gc.gc_next; gc != &unreachable; gc = gc->gc.gc_next) {
-        _PyRuntime.gc.generation_stats[gc->gc.generation].size--;
-    }
-
     /* Move reachable objects to next generation. */
     if (young != old) {
-        /* Long lived pending is just the size of generation 1 (or more generally, the sum of the sizes of all
-         * generations which are not generation 0 or the last generation).
-         */
-        // if (generation == NUM_GENERATIONS - 2) {
-        //     _PyRuntime.gc.long_lived_pending += gc_list_size(young);
-        // }
+        if (generation == NUM_GENERATIONS - 2) {
+            _PyRuntime.gc.long_lived_pending += gc_list_size(young);
+        }
         gc_list_merge(young, old);
     }
     else {
         /* We only untrack dicts in full collections, to avoid quadratic
            dict build-up. See issue #14775. */
         untrack_dicts(young);
-        /* Long lived total is just the size of generation 2 (the last generation). */
-        // _PyRuntime.gc.long_lived_pending = 0;
-        // _PyRuntime.gc.long_lived_total = gc_list_size(young);
+        _PyRuntime.gc.long_lived_pending = 0;
+        _PyRuntime.gc.long_lived_total = gc_list_size(young);
     }
 
     /* All objects in unreachable are trash, but objects reachable from
@@ -1006,12 +1082,10 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     if (check_garbage(&unreachable)) {
         revive_garbage(&unreachable);
 
-        PySys_WriteStderr("wut be this?\n");
-
-        /* Everything revived moves up a generation. */
         for (gc = unreachable.gc.gc_next; gc != &unreachable; gc = gc->gc.gc_next) {
-            _PyRuntime.gc.generation_stats[next_generation].size++;
+            _PyRuntime.gc.generation_stats[gc->gc.generation].size--;
             gc->gc.generation = next_generation;
+            _PyRuntime.gc.generation_stats[next_generation].size++;
         }
 
         gc_list_merge(&unreachable, old);
@@ -1021,6 +1095,12 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
          * the reference cycles to be broken.  It may also cause some objects
          * in finalizers to be freed.
          */
+        for (gc = unreachable.gc.gc_next; gc != &unreachable; gc = gc->gc.gc_next) {
+            _PyRuntime.gc.generation_stats[gc->gc.generation].size--;
+            gc->gc.generation = next_generation;
+            _PyRuntime.gc.generation_stats[next_generation].size++;
+        }
+
         delete_garbage(&unreachable, old);
     }
 
@@ -1055,6 +1135,11 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
      * this if they insist on creating this type of structure.
      */
     handle_legacy_finalizers(&finalizers, old);
+    for (gc = finalizers.gc.gc_next; gc != &finalizers; gc = gc->gc.gc_next) {
+        _PyRuntime.gc.generation_stats[gc->gc.generation].size--;
+        gc->gc.generation = next_generation;
+        _PyRuntime.gc.generation_stats[next_generation].size++;
+    }
 
     /* Clear free list only during the collection of the highest
      * generation */
@@ -1082,6 +1167,13 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     stats->collections++;
     stats->collected += m;
     stats->uncollectable += n;
+
+    /* Take a snapshot of learning stats after collection and call reward. */
+    update_learning_stats();
+    _PyRuntime.gc.learning_stats.collected[generation] = m;
+    _PyRuntime.gc.learning_stats.generation = generation;
+    struct gc_learning_stats learning_after = _PyRuntime.gc.learning_stats;
+    learning_reward(learning_before, learning_after);
 
     if (PyDTrace_GC_DONE_ENABLED())
         PyDTrace_GC_DONE(n+m);
@@ -1591,6 +1683,32 @@ gc_get_memory_impl(PyObject *module)
     return memory;
 }
 
+static int
+print_verbose_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data)
+{
+    uint64_t key, value;
+
+    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, key);
+    _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
+
+    if (value >= parameter_modulo) {
+        fprintf(stderr, "%lu:%lu,", key, value);
+    }
+
+    return 0;
+}
+
+static void
+gc_print_tuning_stats_impl(PyObject *module)
+{
+    fprintf(stderr, "%lu\n%lu\n", tuning_memory, tuning_objects);
+
+    if (parameter_verbose) {
+        _Py_hashtable_foreach(hit_counts, print_verbose_entry, NULL);
+        fprintf(stderr, "\n");
+    }
+}
+
 
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
@@ -1613,7 +1731,8 @@ PyDoc_STRVAR(gc__doc__,
 "unfreeze() -- Unfreeze all objects in the permanent generation.\n"
 "get_freeze_count() -- Return the number of objects in the permanent generation.\n"
 "get_size() -- Return the current generation sizes.\n"
-"get_memory() -- Return the memory usage in bytes.\n");
+"get_memory() -- Return the memory usage in bytes.\n"
+"print_tuning_stats() -- Prints the tuning statistics.\n");
 
 static PyMethodDef GcMethods[] = {
     GC_ENABLE_METHODDEF
@@ -1637,6 +1756,7 @@ static PyMethodDef GcMethods[] = {
     GC_GET_FREEZE_COUNT_METHODDEF
     GC_GET_SIZE_METHODDEF
     GC_GET_MEMORY_METHODDEF
+    GC_PRINT_TUNING_STATS_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -1831,8 +1951,27 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
     g->gc.gc_refs = 0;
     _PyGCHead_SET_REFS(g, GC_UNTRACKED);
     _PyRuntime.gc.generations[0].count++; /* number of allocated GC objects */
+
+    /* Determine if collection should occur and which generation to collect. */
     if (_PyRuntime.gc.enabled && !_PyRuntime.gc.collecting && !PyErr_Occurred()) {
-        int generation = learning_predict(get_learning_stats());
+        update_learning_stats();
+
+        /* Update verbose hit count. */
+        if (parameter_verbose) {
+            uint64_t key = _PyRuntime.gc.learning_stats.instruction;
+            _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(hit_counts, key);
+            uint64_t count;
+            if (entry != NULL) {
+                _Py_HASHTABLE_ENTRY_READ_DATA(hit_counts, entry, count);
+                count++;
+                _Py_HASHTABLE_ENTRY_WRITE_DATA(hit_counts, entry, count);
+            } else {
+                count = 0;
+                _Py_HASHTABLE_SET(hit_counts, key, count);
+            }
+        }
+
+        int generation = learning_predict(_PyRuntime.gc.learning_stats);
         if (generation != -1) {
             _PyRuntime.gc.collecting = 1;
             collect_with_callback(generation);

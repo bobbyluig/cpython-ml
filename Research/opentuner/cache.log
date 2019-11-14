@@ -1,0 +1,37 @@
+Located 6 possible collection points.
+[     7s]    INFO opentuner.search.plugin.DisplayPlugin: tests=22, best {'generation': 2, 'instruction': 21627, 'modulo': 67}, cost time=1294798.0000, found by NormalGreedyMutation
+[    12s]    INFO opentuner.search.plugin.DisplayPlugin: tests=36, best {'generation': 2, 'instruction': 21627, 'modulo': 67}, cost time=1294798.0000, found by NormalGreedyMutation
+[    18s]    INFO opentuner.search.plugin.DisplayPlugin: tests=43, best {'generation': 2, 'instruction': 21627, 'modulo': 67}, cost time=1294798.0000, found by NormalGreedyMutation
+[    23s]    INFO opentuner.search.plugin.DisplayPlugin: tests=52, best {'generation': 2, 'instruction': 21627, 'modulo': 67}, cost time=1294798.0000, found by NormalGreedyMutation
+[    28s]    INFO opentuner.search.plugin.DisplayPlugin: tests=62, best {'generation': 2, 'instruction': 21627, 'modulo': 67}, cost time=1294798.0000, found by NormalGreedyMutation
+[    34s]    INFO opentuner.search.plugin.DisplayPlugin: tests=84, best {'generation': 2, 'instruction': 21627, 'modulo': 152}, cost time=1052794.0000, found by NormalGreedyMutation
+[    40s]    INFO opentuner.search.plugin.DisplayPlugin: tests=91, best {'generation': 2, 'instruction': 21627, 'modulo': 152}, cost time=1052794.0000, found by NormalGreedyMutation
+[    45s]    INFO opentuner.search.plugin.DisplayPlugin: tests=112, best {'generation': 2, 'instruction': 21627, 'modulo': 152}, cost time=1052794.0000, found by NormalGreedyMutation
+[    51s]    INFO opentuner.search.plugin.DisplayPlugin: tests=131, best {'generation': 2, 'instruction': 21627, 'modulo': 152}, cost time=1052794.0000, found by NormalGreedyMutation
+[    59s]    INFO opentuner.search.plugin.DisplayPlugin: tests=144, best {'generation': 2, 'instruction': 21627, 'modulo': 152}, cost time=1052794.0000, found by NormalGreedyMutation
+[    65s]    INFO opentuner.search.plugin.DisplayPlugin: tests=161, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[    73s]    INFO opentuner.search.plugin.DisplayPlugin: tests=174, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[    78s]    INFO opentuner.search.plugin.DisplayPlugin: tests=185, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[    86s]    INFO opentuner.search.plugin.DisplayPlugin: tests=197, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[    93s]    INFO opentuner.search.plugin.DisplayPlugin: tests=207, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[    99s]    INFO opentuner.search.plugin.DisplayPlugin: tests=216, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[   106s]    INFO opentuner.search.plugin.DisplayPlugin: tests=228, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[   111s]    INFO opentuner.search.plugin.DisplayPlugin: tests=244, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[   117s]    INFO opentuner.search.plugin.DisplayPlugin: tests=263, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[   122s]    INFO opentuner.search.plugin.DisplayPlugin: tests=275, best {'generation': 2, 'instruction': 21627, 'modulo': 165}, cost time=1041445.0000, found by NormalGreedyMutation
+[   129s]    INFO opentuner.search.plugin.DisplayPlugin: tests=291, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   137s]    INFO opentuner.search.plugin.DisplayPlugin: tests=303, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   142s]    INFO opentuner.search.plugin.DisplayPlugin: tests=323, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   147s]    INFO opentuner.search.plugin.DisplayPlugin: tests=343, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   155s]    INFO opentuner.search.plugin.DisplayPlugin: tests=359, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   161s]    INFO opentuner.search.plugin.DisplayPlugin: tests=368, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   166s]    INFO opentuner.search.plugin.DisplayPlugin: tests=376, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   171s]    INFO opentuner.search.plugin.DisplayPlugin: tests=389, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   171s]    INFO opentuner.search.metatechniques: AUCBanditMetaTechniqueA: [('NormalGreedyMutation', 192), ('DifferentialEvolutionAlt', 165), ('UniformGreedyMutation', 105), ('RandomNelderMead', 39)]
+[   177s]    INFO opentuner.search.plugin.DisplayPlugin: tests=396, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   182s]    INFO opentuner.search.plugin.DisplayPlugin: tests=409, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+[   182s]    INFO opentuner.search.plugin.DisplayPlugin: tests=409, best {'generation': 2, 'instruction': 21604, 'modulo': 40063}, cost time=1025782.0000, found by DifferentialEvolutionAlt
+Optimal values written to optimal.json: {'generation': 2, 'instruction': 21604, 'modulo': 40063}
+Default strategy: 12641464 2849870
+Optimal strategy: 11523960 1025782
+Pareto dominant solution found.

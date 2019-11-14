@@ -361,4 +361,23 @@ gc_get_memory(PyObject *module, PyObject *Py_UNUSED(ignored))
 {
     return PyLong_FromSsize_t(gc_get_memory_impl(module));
 }
+
+PyDoc_STRVAR(gc_print_tuning_stats__doc__,
+             "print_tuning_stats($module, /)\n"
+             "--\n"
+             "\n"
+             "Return the memory usage in bytes.");
+
+#define GC_PRINT_TUNING_STATS_METHODDEF    \
+    {"print_tuning_stats", (PyCFunction)gc_print_tuning_stats, METH_NOARGS, gc_print_tuning_stats__doc__},
+
+static void
+gc_print_tuning_stats_impl(PyObject *module);
+
+static PyObject *
+gc_print_tuning_stats(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    gc_print_tuning_stats_impl(module);
+    Py_RETURN_NONE;
+}
 /*[clinic end generated code: output=21dc9270b10b7891 input=a9049054013a1b77]*/
