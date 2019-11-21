@@ -5,8 +5,8 @@ from opentuner import EnumParameter
 from opentuner import MeasurementInterface
 from opentuner import Result
 
-FILE = '/mnt/c/urop/cpython/Research/programs/transaction/transaction2.py'
-INTERPRETER = '/mnt/c/urop/python3/bin/python3.7'
+FILE = '../programs/transaction/transaction2.py'
+INTERPRETER = '../../../python3/bin/python3.7'
 MODULO_THRESHOLD = 500
 TIME_LIMIT = 3.0
 
