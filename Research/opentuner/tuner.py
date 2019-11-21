@@ -5,10 +5,10 @@ from opentuner import EnumParameter
 from opentuner import MeasurementInterface
 from opentuner import Result
 
-FILE = '../programs/transaction/transaction2.py'
+FILE = '../programs/server/server2.py'
 INTERPRETER = '../../../python3/bin/python3.7'
 MODULO_THRESHOLD = 500
-TIME_LIMIT = 3.0
+TIME_LIMIT = 60.0
 
 
 class GCTuner(MeasurementInterface):
