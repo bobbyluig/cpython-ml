@@ -66,6 +66,10 @@ static uint64_t parameter_verbose = 0;
 static uint64_t tuning_memory = 0;
 static uint64_t tuning_objects = 0;
 
+/* Verbose information */
+static PyObject *verbose_filename = NULL;
+static int verbose_lineno = 0;
+
 /* set for debugging information */
 #define DEBUG_STATS             (1<<0) /* print collection statistics */
 #define DEBUG_COLLECTABLE       (1<<1) /* print collectable objects */
@@ -895,6 +899,16 @@ learning_predict(struct gc_learning_stats stats) {
     /* Update hit counter appropriately. */
     if (stats.instruction == parameter_instruction1) {
         hit1++;
+
+        // Update verbose file and line.
+        if (parameter_verbose && verbose_filename == NULL) {
+            PyThreadState *tstate = PyThreadState_GET();
+
+            if (tstate->frame != NULL) {
+                verbose_filename = tstate->frame->f_code->co_filename;
+                verbose_lineno = tstate->frame->f_code->co_firstlineno;
+            }
+        }
     }
     if (stats.instruction == parameter_instruction2) {
         hit2++;
@@ -1723,6 +1737,18 @@ gc_print_tuning_stats_impl(PyObject *module)
     if (parameter_verbose) {
         _Py_hashtable_foreach(hit_counts, print_verbose_entry, NULL);
         fprintf(stderr, "\n");
+
+        if (verbose_filename != NULL) {
+            PyObject* repr = PyObject_Repr(verbose_filename);
+            PyObject* str = PyUnicode_AsEncodedString(repr, "utf-8", "~E~");
+            const char *bytes = PyBytes_AS_STRING(str);
+
+            fprintf(stderr, "filename: %s\n", bytes);
+            fprintf(stderr, "line_no: %d\n", verbose_lineno);
+
+            Py_XDECREF(repr);
+            Py_XDECREF(str);
+        }
     }
 }
 
