@@ -24,7 +24,7 @@ class GCTuner(MeasurementInterface):
         self.default_memory = int(values[0])
         self.default_objects = int(values[1])
 
-        param_cmd = 'RESEARCH_MODULO={} RESEARCH_VERBOSE=1 {} {}'.format(MODULO_THRESHOLD, INTERPRETER, FILE)
+        param_cmd = 'RESEARCH_MODULO1={} RESEARCH_VERBOSE=1 {} {}'.format(MODULO_THRESHOLD, INTERPRETER, FILE)
         run_result = self.call_program(param_cmd)
         assert run_result['returncode'] == 0
 
@@ -34,14 +34,19 @@ class GCTuner(MeasurementInterface):
 
     def manipulator(self):
         m = ConfigurationManipulator()
-        m.add_parameter(EnumParameter('instruction', self.instructions))
-        m.add_parameter(LogIntegerParameter('modulo', 5, 1000000))
-        m.add_parameter(EnumParameter('generation', [0, 1, 2]))
+        m.add_parameter(EnumParameter('instruction1', self.instructions))
+        m.add_parameter(LogIntegerParameter('modulo1', 5, 1000000))
+        m.add_parameter(EnumParameter('generation1', [0, 1, 2]))
+        m.add_parameter(EnumParameter('instruction2', self.instructions))
+        m.add_parameter(LogIntegerParameter('modulo2', 5, 1000000))
+        m.add_parameter(EnumParameter('generation2', [0, 1, 2]))
         return m
 
     def compile(self, cfg, id):
-        run_cmd = 'RESEARCH_INSTRUCTION={} RESEARCH_MODULO={} RESEARCH_GENERATION={} {} {}'.format(
-            cfg['instruction'], cfg['modulo'], cfg['generation'], INTERPRETER, FILE)
+        run_cmd = 'RESEARCH_INSTRUCTION1={} RESEARCH_MODULO1={} RESEARCH_GENERATION1={} ' \
+                  'RESEARCH_INSTRUCTION2={} RESEARCH_MODULO2={} RESEARCH_GENERATION2={} ' \
+                  '{} {}'.format(cfg['instruction1'], cfg['modulo1'], cfg['generation1'], cfg['instruction2'],
+                                 cfg['modulo2'], cfg['generation2'], INTERPRETER, FILE)
         try:
             run_result = self.call_program(run_cmd, limit=TIME_LIMIT)
             assert run_result['returncode'] == 0
@@ -54,7 +59,7 @@ class GCTuner(MeasurementInterface):
 
         if memory >= self.default_memory:
             score = 2000000000000000000 + memory
-        elif objects > self.default_objects:
+        elif objects >= self.default_objects:
             score = 1000000000000000000 + objects
         else:
             score = objects
@@ -70,8 +75,10 @@ class GCTuner(MeasurementInterface):
         print('Optimal values written to optimal.json: {}'.format(cfg))
         self.manipulator().save_to_file(cfg, 'optimal.json')
 
-        run_cmd = 'RESEARCH_INSTRUCTION={} RESEARCH_MODULO={} RESEARCH_GENERATION={} {} {}'.format(
-            cfg['instruction'], cfg['modulo'], cfg['generation'], INTERPRETER, FILE)
+        run_cmd = 'RESEARCH_INSTRUCTION1={} RESEARCH_MODULO1={} RESEARCH_GENERATION1={} ' \
+                  'RESEARCH_INSTRUCTION2={} RESEARCH_MODULO2={} RESEARCH_GENERATION2={} ' \
+                  '{} {}'.format(cfg['instruction1'], cfg['modulo1'], cfg['generation1'], cfg['instruction2'],
+                                 cfg['modulo2'], cfg['generation2'], INTERPRETER, FILE)
         run_result = self.call_program(run_cmd)
         assert run_result['returncode'] == 0
 

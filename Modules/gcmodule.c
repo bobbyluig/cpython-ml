@@ -54,9 +54,12 @@ size_t memory = 0;
 _Py_hashtable_t *hit_counts = NULL;
 
 /* Parameters for tuning. */
-static uint64_t parameter_instruction = 0;
-static uint64_t parameter_modulo = 0;
-static uint64_t parameter_generation = 0;
+static uint64_t parameter_instruction1 = 0;
+static uint64_t parameter_modulo1 = 0;
+static uint64_t parameter_generation1 = 0;
+static uint64_t parameter_instruction2 = 0;
+static uint64_t parameter_modulo2 = 0;
+static uint64_t parameter_generation2 = 0;
 static uint64_t parameter_verbose = 0;
 
 /* Tuning statistics */
@@ -124,13 +127,19 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
         state->generation_stats[i] = generation_stats;
     };
 
-    const char *instruction = Py_GETENV("RESEARCH_INSTRUCTION");
-    const char *modulo = Py_GETENV("RESEARCH_MODULO");
-    const char *generation = Py_GETENV("RESEARCH_GENERATION");
+    const char *instruction1 = Py_GETENV("RESEARCH_INSTRUCTION1");
+    const char *modulo1 = Py_GETENV("RESEARCH_MODULO1");
+    const char *generation1 = Py_GETENV("RESEARCH_GENERATION1");
+    const char *instruction2 = Py_GETENV("RESEARCH_INSTRUCTION2");
+    const char *modulo2 = Py_GETENV("RESEARCH_MODULO2");
+    const char *generation2 = Py_GETENV("RESEARCH_GENERATION2");
     const char *verbose = Py_GETENV("RESEARCH_VERBOSE");
-    parameter_instruction = (instruction != NULL) ? atol(instruction) : 0;
-    parameter_modulo = (modulo != NULL) ? atol(modulo) : 0;
-    parameter_generation = (generation != NULL) ? atol(generation) : 0;
+    parameter_instruction1 = (instruction1 != NULL) ? atol(instruction1) : 0;
+    parameter_modulo1 = (modulo1 != NULL) ? atol(modulo1) : 0;
+    parameter_generation1 = (generation1 != NULL) ? atol(generation1) : 0;
+    parameter_instruction2 = (instruction2 != NULL) ? atol(instruction2) : 0;
+    parameter_modulo2 = (modulo2 != NULL) ? atol(modulo2) : 0;
+    parameter_generation2 = (generation2 != NULL) ? atol(generation2) : 0;
     parameter_verbose = (verbose != NULL) ? atol(verbose) : 0;
 
     if (parameter_verbose) {
@@ -880,25 +889,33 @@ clear_freelists(void)
 static int _Py_HOT_FUNCTION
 learning_predict(struct gc_learning_stats stats) {
     /* The number of times the target bytecode has been hit. */
-    static uint64_t hit = 0;
+    static uint64_t hit1 = 0;
+    static uint64_t hit2 = 0;
 
     /* Update hit counter appropriately. */
-    if (stats.instruction == parameter_instruction) {
-        hit++;
+    if (stats.instruction == parameter_instruction1) {
+        hit1++;
+    }
+    if (stats.instruction == parameter_instruction2) {
+        hit2++;
     }
 
     /* Update the maximum memory. */
     tuning_memory = Py_MAX(tuning_memory, stats.memory);
 
     /* Don't use special policy if the modulo is not defined. */
-    if (parameter_modulo != 0) {
+    if (parameter_modulo1 != 0 || parameter_modulo2 != 0) {
         /* Should we collect? */
-        if (hit == parameter_modulo) {
-            hit = 0;
-            return parameter_generation;
-        } else {
-            return -1;
+        int generation = -1;
+        if (hit1 == parameter_modulo1) {
+            hit1 = 0;
+            generation = Py_MAX(generation, (int) parameter_generation1);
         }
+        if (hit2 == parameter_modulo2) {
+            hit2 = 0;
+            generation = Py_MAX(generation, (int) parameter_generation2);
+        }
+        return generation;
     }
 
     /* If the count of generation 0 does not exceed the threshold, do nothing. */
@@ -1691,7 +1708,7 @@ print_verbose_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *use
     _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, key);
     _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
 
-    if (value >= parameter_modulo) {
+    if (value >= parameter_modulo1) {
         fprintf(stderr, "%lu:%lu,", key, value);
     }
 
