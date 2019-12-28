@@ -4,9 +4,6 @@
 #include "accu.h"
 #include "_iomodule.h"
 
-#include "internal/mem.h"
-#include "internal/pystate.h"
-
 /* Implementation note: the buffer is always at least one character longer
    than the enclosed string, for proper functioning of _PyIO_find_line_ending.
 */

@@ -13,9 +13,6 @@
 #include "structmember.h"
 #include "_iomodule.h"
 
-#include "internal/mem.h"
-#include "internal/pystate.h"
-
 /*[clinic input]
 module _io
 class _io._IOBase "PyObject *" "&PyIOBase_Type"

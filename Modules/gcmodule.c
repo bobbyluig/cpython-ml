@@ -889,95 +889,6 @@ clear_freelists(void)
     (void)PyContext_ClearFreeList();
 }
 
-/* Method for learning GC to determine which generation to collect, or -1 for no collection. */
-static int _Py_HOT_FUNCTION
-learning_predict(struct gc_learning_stats stats) {
-    /* The number of times the target bytecode has been hit. */
-    static uint64_t hit1 = 0;
-    static uint64_t hit2 = 0;
-
-    /* Update hit counter appropriately. */
-    if (stats.instruction == parameter_instruction1) {
-        hit1++;
-
-        // Update verbose file and line.
-        if (parameter_verbose && verbose_filename == NULL) {
-            PyThreadState *tstate = PyThreadState_GET();
-
-            if (tstate->frame != NULL) {
-                verbose_filename = tstate->frame->f_code->co_filename;
-                verbose_lineno = tstate->frame->f_code->co_firstlineno;
-            }
-        }
-    }
-    if (stats.instruction == parameter_instruction2) {
-        hit2++;
-    }
-
-    /* Update the maximum memory. */
-    tuning_memory = Py_MAX(tuning_memory, stats.memory);
-
-    /* Don't use special policy if the modulo is not defined. */
-    if (parameter_modulo1 != 0 || parameter_modulo2 != 0) {
-        /* Should we collect? */
-        int generation = -1;
-        if (hit1 == parameter_modulo1) {
-            hit1 = 0;
-            generation = Py_MAX(generation, (int) parameter_generation1);
-        }
-        if (hit2 == parameter_modulo2) {
-            hit2 = 0;
-            generation = Py_MAX(generation, (int) parameter_generation2);
-        }
-        return generation;
-    }
-
-    /* If the count of generation 0 does not exceed the threshold, do nothing. */
-    if (stats.count[0] <= _PyRuntime.gc.generations[0].threshold) {
-        return -1;
-    }
-
-    /* Determine which generation to collect. */
-    for (int i = NUM_GENERATIONS - 1; i >= 1; i--) {
-        if (stats.count[i] > _PyRuntime.gc.generations[i].threshold) {
-            if (i == NUM_GENERATIONS - 1 && _PyRuntime.gc.long_lived_pending < _PyRuntime.gc.long_lived_total / 4) {
-                continue;
-            }
-            return i;
-        }
-    }
-
-    /* The first generation should be collected */
-    return 0;
-}
-
-/* Method for learning GC to be rewarded after collection. */
-static void
-learning_reward(struct gc_learning_stats before, struct gc_learning_stats after) {
-    /* Update the total number of objects scanned. */
-    for (int i = 0; i <= after.generation; i++) {
-        tuning_objects += before.size[i];
-    }
-}
-
-/* Update learning stats. */
-static void _Py_HOT_FUNCTION
-update_learning_stats() {
-    for (int i = 0; i < NUM_GENERATIONS; i++) {
-        _PyRuntime.gc.learning_stats.count[i] = _PyRuntime.gc.generations[i].count;
-        _PyRuntime.gc.learning_stats.size[i] = _PyRuntime.gc.generation_stats[i].size;
-    }
-    _PyRuntime.gc.learning_stats.memory = memory;
-     PyThreadState *tstate = PyThreadState_GET();
-     if (tstate->frame != NULL) {
-         _PyRuntime.gc.learning_stats.code = tstate->frame->f_code->co_id;
-         if (tstate->frame->f_lasti >= 0) {
-             _PyRuntime.gc.learning_stats.instruction = tstate->frame->f_code->co_id +
-                     tstate->frame->f_lasti / sizeof(_Py_CODEUNIT);
-         }
-     }
-}
-
 /* This is the main function.  Read this to understand how the
  * collection process works. */
 static Py_ssize_t
@@ -996,20 +907,13 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
 
     struct gc_generation_stats *stats = &_PyRuntime.gc.generation_stats[generation];
 
-    /* Take a snapshot of learning stats before collection. */
-    struct gc_learning_stats learning_before = _PyRuntime.gc.learning_stats;
-
     if (_PyRuntime.gc.debug & DEBUG_STATS) {
-        PySys_WriteStderr("gc: time %.7f\n", _PyTime_AsSecondsDouble(_PyTime_GetSystemClock()));
         PySys_WriteStderr("gc: collecting generation %d...\n",
                           generation);
         PySys_WriteStderr("gc: objects in each generation:");
         for (i = 0; i < NUM_GENERATIONS; i++)
             PySys_FormatStderr(" %zd",
                               gc_list_size(GEN_HEAD(i)));
-        PySys_WriteStderr("\ngc: memory in each generation before:");
-        for (i = 0; i < NUM_GENERATIONS; i++)
-            PySys_FormatStderr(" %zd", gc_list_memory(GEN_HEAD(i)));
         PySys_WriteStderr("\ngc: objects in permanent generation: %zd",
                          gc_list_size(&_PyRuntime.gc.permanent_generation.head));
         t1 = _PyTime_GetMonotonicClock();
@@ -1038,11 +942,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     else
         old = young;
 
-    /* Compute the next generation. */
-    int next_generation = (generation < NUM_GENERATIONS - 1)
-            ? generation + 1
-            : generation;
-
     /* Using ob_refcnt and gc_refs, calculate which objects in the
      * container set are reachable from outside the set (i.e., have a
      * refcount greater than 0 when all the references within the
@@ -1059,13 +958,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
      */
     gc_list_init(&unreachable);
     move_unreachable(young, &unreachable);
-
-    /* Everything in young moves up a generation. */
-    for (gc = young->gc.gc_next; gc != young; gc = gc->gc.gc_next) {
-        _PyRuntime.gc.generation_stats[gc->gc.generation].size--;
-        _PyRuntime.gc.generation_stats[next_generation].size++;
-        gc->gc.generation = next_generation;
-    }
 
     /* Move reachable objects to next generation. */
     if (young != old) {
@@ -1112,13 +1004,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
 
     if (check_garbage(&unreachable)) {
         revive_garbage(&unreachable);
-
-        for (gc = unreachable.gc.gc_next; gc != &unreachable; gc = gc->gc.gc_next) {
-            _PyRuntime.gc.generation_stats[gc->gc.generation].size--;
-            gc->gc.generation = next_generation;
-            _PyRuntime.gc.generation_stats[next_generation].size++;
-        }
-
         gc_list_merge(&unreachable, old);
     }
     else {
@@ -1126,12 +1011,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
          * the reference cycles to be broken.  It may also cause some objects
          * in finalizers to be freed.
          */
-        for (gc = unreachable.gc.gc_next; gc != &unreachable; gc = gc->gc.gc_next) {
-            _PyRuntime.gc.generation_stats[gc->gc.generation].size--;
-            gc->gc.generation = next_generation;
-            _PyRuntime.gc.generation_stats[next_generation].size++;
-        }
-
         delete_garbage(&unreachable, old);
     }
 
@@ -1153,12 +1032,8 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
             PySys_FormatStderr(
                 "gc: done, %zd unreachable, %zd uncollectable",
                 n+m, n);
-        PySys_WriteStderr(", %.7fs elapsed",
+        PySys_WriteStderr(", %.4fs elapsed\n",
                           _PyTime_AsSecondsDouble(t2 - t1));
-        PySys_WriteStderr("\ngc: memory in each generation after:");
-        for (i = 0; i < NUM_GENERATIONS; i++)
-            PySys_FormatStderr(" %zd", gc_list_memory(GEN_HEAD(i)));
-        PySys_WriteStderr("\n");
     }
 
     /* Append instances in the uncollectable set to a Python
@@ -1166,11 +1041,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
      * this if they insist on creating this type of structure.
      */
     handle_legacy_finalizers(&finalizers, old);
-    for (gc = finalizers.gc.gc_next; gc != &finalizers; gc = gc->gc.gc_next) {
-        _PyRuntime.gc.generation_stats[gc->gc.generation].size--;
-        gc->gc.generation = next_generation;
-        _PyRuntime.gc.generation_stats[next_generation].size++;
-    }
 
     /* Clear free list only during the collection of the highest
      * generation */
@@ -1198,13 +1068,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     stats->collections++;
     stats->collected += m;
     stats->uncollectable += n;
-
-    /* Take a snapshot of learning stats after collection and call reward. */
-    update_learning_stats();
-    _PyRuntime.gc.learning_stats.collected[generation] = m;
-    _PyRuntime.gc.learning_stats.generation = generation;
-    struct gc_learning_stats learning_after = _PyRuntime.gc.learning_stats;
-    learning_reward(learning_before, learning_after);
 
     if (PyDTrace_GC_DONE_ENABLED())
         PyDTrace_GC_DONE(n+m);
@@ -1602,11 +1465,10 @@ gc_get_stats_impl(PyObject *module)
     for (i = 0; i < NUM_GENERATIONS; i++) {
         PyObject *dict;
         st = &stats[i];
-        dict = Py_BuildValue("{snsnsnsn}",
+        dict = Py_BuildValue("{snsnsn}",
                              "collections", st->collections,
                              "collected", st->collected,
-                             "uncollectable", st->uncollectable,
-                             "size", st->size
+                             "uncollectable", st->uncollectable
                             );
         if (dict == NULL)
             goto error;
@@ -1699,59 +1561,6 @@ gc_get_freeze_count_impl(PyObject *module)
     return gc_list_size(&_PyRuntime.gc.permanent_generation.head);
 }
 
-static PyObject *
-gc_get_size_impl(PyObject *module)
-{
-    return Py_BuildValue("(iii)",
-                         _PyRuntime.gc.generation_stats[0].size,
-                         _PyRuntime.gc.generation_stats[1].size,
-                         _PyRuntime.gc.generation_stats[2].size);
-}
-
-static Py_ssize_t
-gc_get_memory_impl(PyObject *module)
-{
-    return memory;
-}
-
-static int
-print_verbose_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data)
-{
-    uint64_t key, value;
-
-    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, key);
-    _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
-
-    if (value >= parameter_modulo1) {
-        fprintf(stderr, "%lu:%lu,", key, value);
-    }
-
-    return 0;
-}
-
-static void
-gc_print_tuning_stats_impl(PyObject *module)
-{
-    fprintf(stderr, "%lu\n%lu\n", tuning_memory, tuning_objects);
-
-    if (parameter_verbose) {
-        _Py_hashtable_foreach(hit_counts, print_verbose_entry, NULL);
-        fprintf(stderr, "\n");
-
-        if (verbose_filename != NULL) {
-            PyObject* repr = PyObject_Repr(verbose_filename);
-            PyObject* str = PyUnicode_AsEncodedString(repr, "utf-8", "~E~");
-            const char *bytes = PyBytes_AS_STRING(str);
-
-            fprintf(stderr, "filename: %s\n", bytes);
-            fprintf(stderr, "line_no: %d\n", verbose_lineno);
-
-            Py_XDECREF(repr);
-            Py_XDECREF(str);
-        }
-    }
-}
-
 
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
@@ -1772,10 +1581,7 @@ PyDoc_STRVAR(gc__doc__,
 "get_referents() -- Return the list of objects that an object refers to.\n"
 "freeze() -- Freeze all tracked objects and ignore them for future collections.\n"
 "unfreeze() -- Unfreeze all objects in the permanent generation.\n"
-"get_freeze_count() -- Return the number of objects in the permanent generation.\n"
-"get_size() -- Return the current generation sizes.\n"
-"get_memory() -- Return the memory usage in bytes.\n"
-"print_tuning_stats() -- Prints the tuning statistics.\n");
+"get_freeze_count() -- Return the number of objects in the permanent generation.\n");
 
 static PyMethodDef GcMethods[] = {
     GC_ENABLE_METHODDEF
@@ -1797,9 +1603,6 @@ static PyMethodDef GcMethods[] = {
     GC_FREEZE_METHODDEF
     GC_UNFREEZE_METHODDEF
     GC_GET_FREEZE_COUNT_METHODDEF
-    GC_GET_SIZE_METHODDEF
-    GC_GET_MEMORY_METHODDEF
-    GC_PRINT_TUNING_STATS_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -1994,32 +1797,14 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
     g->gc.gc_refs = 0;
     _PyGCHead_SET_REFS(g, GC_UNTRACKED);
     _PyRuntime.gc.generations[0].count++; /* number of allocated GC objects */
-
-    /* Determine if collection should occur and which generation to collect. */
-    if (_PyRuntime.gc.enabled && !_PyRuntime.gc.collecting && !PyErr_Occurred()) {
-        update_learning_stats();
-
-        /* Update verbose hit count. */
-        if (parameter_verbose) {
-            uint64_t key = _PyRuntime.gc.learning_stats.instruction;
-            _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(hit_counts, key);
-            uint64_t count;
-            if (entry != NULL) {
-                _Py_HASHTABLE_ENTRY_READ_DATA(hit_counts, entry, count);
-                count++;
-                _Py_HASHTABLE_ENTRY_WRITE_DATA(hit_counts, entry, count);
-            } else {
-                count = 0;
-                _Py_HASHTABLE_SET(hit_counts, key, count);
-            }
-        }
-
-        int generation = learning_predict(_PyRuntime.gc.learning_stats);
-        if (generation != -1) {
-            _PyRuntime.gc.collecting = 1;
-            collect_with_callback(generation);
-            _PyRuntime.gc.collecting = 0;
-        }
+    if (_PyRuntime.gc.generations[0].count > _PyRuntime.gc.generations[0].threshold &&
+        _PyRuntime.gc.enabled &&
+        _PyRuntime.gc.generations[0].threshold &&
+        !_PyRuntime.gc.collecting &&
+        !PyErr_Occurred()) {
+        _PyRuntime.gc.collecting = 1;
+        collect_generations();
+        _PyRuntime.gc.collecting = 0;
     }
     op = FROM_GC(g);
     return op;
@@ -2083,10 +1868,8 @@ void
 PyObject_GC_Del(void *op)
 {
     PyGC_Head *g = AS_GC(op);
-    if (IS_TRACKED(op)) {
+    if (IS_TRACKED(op))
         gc_list_remove(g);
-        _PyRuntime.gc.generation_stats[g->gc.generation].size--;
-    }
     if (_PyRuntime.gc.generations[0].count > 0) {
         _PyRuntime.gc.generations[0].count--;
     }

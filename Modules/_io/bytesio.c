@@ -2,9 +2,6 @@
 #include "structmember.h"       /* for offsetof() */
 #include "_iomodule.h"
 
-#include "internal/mem.h"
-#include "internal/pystate.h"
-
 /*[clinic input]
 module _io
 class _io.BytesIO "bytesio *" "&PyBytesIO_Type"
