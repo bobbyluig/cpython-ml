@@ -198,10 +198,13 @@ PyCode_New(int argcount, int kwonlyargcount,
     co->co_nlocals = nlocals;
     co->co_stacksize = stacksize;
     co->co_flags = flags;
-    co->co_id = global_id;
     Py_INCREF(code);
     co->co_code = code;
+
+    /* Update the global_id for this section of code. */
+    co->co_id = global_id;
     global_id += PyBytes_GET_SIZE(co->co_code) / sizeof(_Py_CODEUNIT);
+
     Py_INCREF(consts);
     co->co_consts = consts;
     Py_INCREF(names);
