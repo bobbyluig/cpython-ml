@@ -50,25 +50,107 @@ static PyObject *gc_str = NULL;
 /* Memory usage for learning GC. */
 size_t memory = 0;
 
-/* Dictionary to keep track of instruction hit count. */
-_Py_hashtable_t *hit_counts = NULL;
+/* Head of code objects. */
+PyCodeObject *co_head = NULL;
 
-/* Parameters for tuning. */
-static uint64_t parameter_instruction1 = 0;
-static uint64_t parameter_modulo1 = 0;
-static uint64_t parameter_generation1 = 0;
-static uint64_t parameter_instruction2 = 0;
-static uint64_t parameter_modulo2 = 0;
-static uint64_t parameter_generation2 = 0;
-static uint64_t parameter_verbose = 0;
+/* Period parameters -- These are all magic.  Don't change. */
+#define N 624
+#define M 397
+#define MATRIX_A 0x9908b0dfU    /* constant vector a */
+#define UPPER_MASK 0x80000000U  /* most significant w-r bits */
+#define LOWER_MASK 0x7fffffffU  /* least significant r bits */
 
-/* Tuning statistics */
-static uint64_t tuning_memory = 0;
-static uint64_t tuning_objects = 0;
+typedef struct {
+    int index;
+    uint32_t state[N];
+} RandomObject;
 
-/* Verbose information */
-static PyObject *verbose_filename = NULL;
-static int verbose_lineno = 0;
+/* generates a random number on [0,0xffffffff]-interval */
+static uint32_t
+genrand_int32(RandomObject *self)
+{
+    uint32_t y;
+    static const uint32_t mag01[2] = {0x0U, MATRIX_A};
+    /* mag01[x] = x * MATRIX_A  for x=0,1 */
+    uint32_t *mt;
+
+    mt = self->state;
+    if (self->index >= N) { /* generate N words at one time */
+        int kk;
+
+        for (kk=0;kk<N-M;kk++) {
+            y = (mt[kk]&UPPER_MASK)|(mt[kk+1]&LOWER_MASK);
+            mt[kk] = mt[kk+M] ^ (y >> 1) ^ mag01[y & 0x1U];
+        }
+        for (;kk<N-1;kk++) {
+            y = (mt[kk]&UPPER_MASK)|(mt[kk+1]&LOWER_MASK);
+            mt[kk] = mt[kk+(M-N)] ^ (y >> 1) ^ mag01[y & 0x1U];
+        }
+        y = (mt[N-1]&UPPER_MASK)|(mt[0]&LOWER_MASK);
+        mt[N-1] = mt[M-1] ^ (y >> 1) ^ mag01[y & 0x1U];
+
+        self->index = 0;
+    }
+
+    y = mt[self->index++];
+    y ^= (y >> 11);
+    y ^= (y << 7) & 0x9d2c5680U;
+    y ^= (y << 15) & 0xefc60000U;
+    y ^= (y >> 18);
+    return y;
+}
+
+static double
+random_random(RandomObject *self)
+{
+    uint32_t a=genrand_int32(self)>>5, b=genrand_int32(self)>>6;
+    return (a*67108864.0+b)*(1.0/9007199254740992.0);
+}
+
+static void
+init_genrand(RandomObject *self, uint32_t s)
+{
+    int mti;
+    uint32_t *mt;
+
+    mt = self->state;
+    mt[0]= s;
+    for (mti=1; mti<N; mti++) {
+        mt[mti] =
+                (1812433253U * (mt[mti-1] ^ (mt[mti-1] >> 30)) + mti);
+        /* See Knuth TAOCP Vol2. 3rd Ed. P.106 for multiplier. */
+        /* In the previous versions, MSBs of the seed affect   */
+        /* only MSBs of the array mt[].                                */
+        /* 2002/01/09 modified by Makoto Matsumoto                     */
+    }
+    self->index = mti;
+    return;
+}
+
+static RandomObject rng = {};
+
+/* State information for policy gradient. */
+typedef struct {
+    // The exponential moving average parameter.
+    double alpha_r;
+    // The exponential average value for rewards.
+    double r_bar;
+    // The learning rate.
+    double alpha_l;
+    // Number of collections since last policy update.
+    uint64_t collections;
+    // Number of collections to update policy.
+    uint64_t update_threshold;
+    // Current memory threshold.
+    uint64_t memory_threshold;
+} gc_policy_state;
+
+/* Actual policy gradient state information, initialized with gc. */
+static gc_policy_state gc_ps;
+
+/* GC statistics. */
+static uint64_t stat_max_memory = 0;
+static uint64_t stat_objects_scanned = 0;
 
 /* set for debugging information */
 #define DEBUG_STATS             (1<<0) /* print collection statistics */
@@ -81,26 +163,18 @@ static int verbose_lineno = 0;
 
 #define GEN_HEAD(n) (&_PyRuntime.gc.generations[n].head)
 
-static Py_uhash_t
-hashtable_hash_uint64_t(_Py_hashtable_t *ht, const void *pkey)
+static uint64_t upper_power_of_two(uint64_t v)
 {
-    uint64_t value;
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    v |= v >> 32;
+    v++;
+    return v;
 
-    _Py_HASHTABLE_READ_KEY(ht, pkey, value);
-
-    return value;
-}
-
-static int
-hashtable_compare_uint64_t(_Py_hashtable_t *ht, const void *pkey,
-                            const _Py_hashtable_entry_t *entry)
-{
-    uint64_t int1, int2;
-
-    _Py_HASHTABLE_READ_KEY(ht, pkey, int1);
-    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, int2);
-
-    return int1 == int2;
 }
 
 void
@@ -126,42 +200,21 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
 
     for (int i = 0; i < NUM_GENERATIONS; i++) {
         struct gc_generation_stats generation_stats = {
-                0, 0, 0, 0
+                0, 0, 0
         };
         state->generation_stats[i] = generation_stats;
     };
 
-    const char *instruction1 = Py_GETENV("RESEARCH_INSTRUCTION1");
-    const char *modulo1 = Py_GETENV("RESEARCH_MODULO1");
-    const char *generation1 = Py_GETENV("RESEARCH_GENERATION1");
-    const char *instruction2 = Py_GETENV("RESEARCH_INSTRUCTION2");
-    const char *modulo2 = Py_GETENV("RESEARCH_MODULO2");
-    const char *generation2 = Py_GETENV("RESEARCH_GENERATION2");
-    const char *verbose = Py_GETENV("RESEARCH_VERBOSE");
-    parameter_instruction1 = (instruction1 != NULL) ? atol(instruction1) : 0;
-    parameter_modulo1 = (modulo1 != NULL) ? atol(modulo1) : 0;
-    parameter_generation1 = (generation1 != NULL) ? atol(generation1) : 0;
-    parameter_instruction2 = (instruction2 != NULL) ? atol(instruction2) : 0;
-    parameter_modulo2 = (modulo2 != NULL) ? atol(modulo2) : 0;
-    parameter_generation2 = (generation2 != NULL) ? atol(generation2) : 0;
-    parameter_verbose = (verbose != NULL) ? atol(verbose) : 0;
+    /* Initialize policy gradient state. */
+    gc_ps.alpha_r = 0.05f;
+    gc_ps.r_bar = -1;
+    gc_ps.alpha_l = 0.1f;
+    gc_ps.collections = 0;
+    gc_ps.update_threshold = 100;
+    gc_ps.memory_threshold = upper_power_of_two(memory);
 
-    if (parameter_verbose) {
-        hit_counts = _Py_hashtable_new(sizeof(uint64_t), sizeof(uint64_t),
-                                       hashtable_hash_uint64_t, hashtable_compare_uint64_t);
-    }
-
-    struct gc_learning_stats learning_stats = {};
-    for (int i = 0; i < NUM_GENERATIONS; i++) {
-        learning_stats.size[i] = 0;
-        learning_stats.count[i] = 0;
-        learning_stats.collected[i] = 0;
-    };
-    learning_stats.generation = NUM_GENERATIONS;
-    learning_stats.code = 0;
-    learning_stats.instruction = 0;
-    learning_stats.memory = 0;
-    state->learning_stats = learning_stats;
+    /* Seed RNG. */
+    init_genrand(&rng, 19650218U);
 }
 
 /*--------------------------------------------------------------------------
@@ -282,18 +335,6 @@ gc_list_merge(PyGC_Head *from, PyGC_Head *to)
         to->gc.gc_prev->gc.gc_next = to;
     }
     gc_list_init(from);
-}
-
-static Py_ssize_t
-gc_list_memory(PyGC_Head *list)
-{
-    PyGC_Head *gc;
-    Py_ssize_t memory = 0;
-    for (gc = list->gc.gc_next; gc != list; gc = gc->gc.gc_next) {
-        PyObject *op = FROM_GC(gc);
-        memory += _PySys_GetSizeOf(op);
-    }
-    return memory;
 }
 
 static Py_ssize_t
@@ -905,6 +946,15 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     PyGC_Head *gc;
     _PyTime_t t1 = 0;   /* initialize to prevent a compiler warning */
 
+    /* Update policy gradient state if possible. */
+    PyThreadState *ts = PyThreadState_GET();
+    if (ts->frame != NULL) {
+        unsigned long offset = ts->frame->f_lasti / sizeof(_Py_CODEUNIT);
+        ts->frame->f_code->co_policy[offset].count++;
+    }
+
+    gc_ps.collections++;
+
     struct gc_generation_stats *stats = &_PyRuntime.gc.generation_stats[generation];
 
     if (_PyRuntime.gc.debug & DEBUG_STATS) {
@@ -958,6 +1008,9 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
      */
     gc_list_init(&unreachable);
     move_unreachable(young, &unreachable);
+
+    /* Keep track of the number of objects scanned. */
+    stat_objects_scanned += gc_list_size(young);
 
     /* Move reachable objects to next generation. */
     if (young != old) {
@@ -1561,6 +1614,68 @@ gc_get_freeze_count_impl(PyObject *module)
     return gc_list_size(&_PyRuntime.gc.permanent_generation.head);
 }
 
+/*[clinic input]
+gc.get_stat_scanned -> Py_ssize_t
+
+Get the total number of objects scanned in all garbage collections.
+[clinic start generated code]*/
+
+static Py_ssize_t
+gc_get_stat_scanned_impl(PyObject *module)
+/*[clinic end generated code: output=8b3e93db53240687 input=26ebc7dae1f5f442]*/
+{
+    return stat_objects_scanned;
+}
+
+/*[clinic input]
+gc.reward
+
+    value: double
+    /
+
+Update garbage collection policy using the provided reward.
+
+The reward must be within 0 to 1 inclusive.
+[clinic start generated code]*/
+
+static PyObject *
+gc_reward_impl(PyObject *module, double value)
+/*[clinic end generated code: output=efd2b9b189133062 input=c348b76328d38d68]*/
+{
+    /* Update exponential moving average of reward. */
+    if (gc_ps.r_bar < 0) {
+        gc_ps.r_bar = value;
+    } else {
+        gc_ps.r_bar = gc_ps.alpha_r * value + (1 - gc_ps.alpha_r) * gc_ps.r_bar;
+    }
+
+    /* Go through all code objects and instructions. */
+    for (PyCodeObject *co = co_head->next; co != co_head; co = co->next) {
+        for (int i = 0; i < PyBytes_GET_SIZE(co->co_code) / sizeof(_Py_CODEUNIT); i++) {
+            double p = co->co_policy[i].p;
+
+            double p_actual = ((double) co->co_policy[i].count) / gc_ps.collections;
+            co->co_policy[i].p = p + gc_ps.alpha_l
+                                     * (p_actual / p - (1 - p_actual) / (1 - p))
+                                     * (value - gc_ps.r_bar);
+
+            /* Clamp values. */
+            if (co->co_policy[i].p < 0.00001) {
+                co->co_policy[i].p = 0.00001f;
+            } else if (co->co_policy[i].p > 0.99999) {
+                co->co_policy[i].p = 0.99999f;
+            }
+
+            /* Reset counter. */
+            co->co_policy[i].count = 0;
+        }
+    }
+
+    /* Reset stats. */
+    gc_ps.collections = 0;
+
+    Py_RETURN_NONE;
+}
 
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
@@ -1581,7 +1696,10 @@ PyDoc_STRVAR(gc__doc__,
 "get_referents() -- Return the list of objects that an object refers to.\n"
 "freeze() -- Freeze all tracked objects and ignore them for future collections.\n"
 "unfreeze() -- Unfreeze all objects in the permanent generation.\n"
-"get_freeze_count() -- Return the number of objects in the permanent generation.\n");
+"get_freeze_count() -- Return the number of objects in the permanent generation.\n"
+"get_stat_scanned() -- Return the number of objects scanned in all garbage collections.\n"
+"reward() -- Update the garbage collection model using the given reward.\n"
+);
 
 static PyMethodDef GcMethods[] = {
     GC_ENABLE_METHODDEF
@@ -1603,6 +1721,8 @@ static PyMethodDef GcMethods[] = {
     GC_FREEZE_METHODDEF
     GC_UNFREEZE_METHODDEF
     GC_GET_FREEZE_COUNT_METHODDEF
+    GC_GET_STAT_SCANNED_METHODDEF
+    GC_REWARD_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -1794,18 +1914,47 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
         g = (PyGC_Head *)PyObject_Malloc(size);
     if (g == NULL)
         return PyErr_NoMemory();
+
+//    /* Keep track of the maximum memory. */
+//    if (memory > stat_max_memory) {
+//        stat_max_memory = memory;
+//    }
+//
+//    /* Check if we need to decrease memory threshold. */
+//    if (memory < gc_ps.memory_threshold / 4) {
+//        gc_ps.memory_threshold = memory;
+//    }
+//
+//    /* Check if we need to force collect. */
+//    if (_PyRuntime.gc.enabled && memory > gc_ps.memory_threshold && !_PyRuntime.gc.collecting
+//        && !PyErr_Occurred()) {
+//        _PyRuntime.gc.collecting = 1;
+//        collect_with_callback(NUM_GENERATIONS - 1);
+//        _PyRuntime.gc.collecting = 0;
+//
+//        /* Increase memory threshold. */
+//        gc_ps.memory_threshold = 2 * memory;
+//    }
+
+    /* Code objects must be initialized. */
+    if (co_head != NULL && _PyRuntime.gc.enabled && !_PyRuntime.gc.collecting && !PyErr_Occurred()) {
+        /* Get the thread state. */
+        PyThreadState *ts = PyThreadState_GET();
+
+        /* Can only predict in a frame. */
+        if (ts->frame != NULL) {
+            unsigned long offset = ts->frame->f_lasti / sizeof(_Py_CODEUNIT);
+
+            if (random_random(&rng) <= ts->frame->f_code->co_policy[offset].p) {
+                _PyRuntime.gc.collecting = 1;
+                collect_with_callback(NUM_GENERATIONS - 1);
+                _PyRuntime.gc.collecting = 0;
+            }
+        }
+    }
+
     g->gc.gc_refs = 0;
     _PyGCHead_SET_REFS(g, GC_UNTRACKED);
-    _PyRuntime.gc.generations[0].count++; /* number of allocated GC objects */
-    if (_PyRuntime.gc.generations[0].count > _PyRuntime.gc.generations[0].threshold &&
-        _PyRuntime.gc.enabled &&
-        _PyRuntime.gc.generations[0].threshold &&
-        !_PyRuntime.gc.collecting &&
-        !PyErr_Occurred()) {
-        _PyRuntime.gc.collecting = 1;
-        collect_generations();
-        _PyRuntime.gc.collecting = 0;
-    }
     op = FROM_GC(g);
     return op;
 }

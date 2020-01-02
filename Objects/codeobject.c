@@ -4,8 +4,14 @@
 #include "code.h"
 #include "structmember.h"
 
-/* Counter for id */
+/* Counter for id. */
 static uint64_t global_id = 0;
+
+/* Head of code objects. */
+extern PyCodeObject *co_head;
+
+/* Null code object. */
+static PyCodeObject null_co = {};
 
 /* Holder for co_extra information */
 typedef struct {
@@ -201,9 +207,34 @@ PyCode_New(int argcount, int kwonlyargcount,
     Py_INCREF(code);
     co->co_code = code;
 
+    /* Get the number of bytecode instructions in this block */
+    int code_size = PyBytes_GET_SIZE(co->co_code) / sizeof(_Py_CODEUNIT);
+
     /* Update the global_id for this section of code. */
     co->co_id = global_id;
-    global_id += PyBytes_GET_SIZE(co->co_code) / sizeof(_Py_CODEUNIT);
+    global_id += code_size;
+
+    /* Allocate space for policy gradient. */
+    co->co_policy = PyMem_Malloc(sizeof(co_policy_state) * code_size);
+
+    /* Initialize defaults. */
+    for (int i = 0; i < code_size; i++) {
+        co->co_policy[i].p = 1.0f / 700.0f;
+        co->co_policy[i].count = 0;
+    }
+
+    /* Set head of code objects if necessary. */
+    if (co_head == NULL) {
+        co_head = &null_co;
+        co_head->next = co_head;
+        co_head->prev = co_head;
+    }
+
+    /* Set next and previous pointers. */
+    co->next = co_head;
+    co->prev = co_head->prev;
+    co->next->prev = co;
+    co->prev->next = co;
 
     Py_INCREF(consts);
     co->co_consts = consts;
@@ -449,6 +480,13 @@ code_dealloc(PyCodeObject *co)
 
         PyMem_Free(co_extra);
     }
+
+    /* Free policy gradient state */
+    PyMem_Free(co->co_policy);
+
+    /* Update doubly linked list. */
+    co->prev->next = co->next;
+    co->next->prev = co->prev;
 
     Py_XDECREF(co->co_code);
     Py_XDECREF(co->co_consts);

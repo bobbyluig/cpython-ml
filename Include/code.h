@@ -17,8 +17,16 @@ typedef uint16_t _Py_CODEUNIT;
 #  define _Py_OPARG(word) ((word) >> 8)
 #endif
 
-/* Bytecode object */
+/* Policy gradient state for each instruction. */
 typedef struct {
+    /* The probability of collection at this point. */
+    double p;
+    /* The actual number of collections at this point since the last policy update. */
+    uint64_t count;;
+} co_policy_state;
+
+/* Bytecode object */
+typedef struct PyCodeObject{
     PyObject_HEAD
     int co_argcount;            /* #arguments, except *args */
     int co_kwonlyargcount;      /* #keyword only arguments */
@@ -49,6 +57,11 @@ typedef struct {
        Type is a void* to keep the format private in codeobject.c to force
        people to go through the proper APIs. */
     void *co_extra;
+    /* State information for policy gradient. */
+    co_policy_state *co_policy;
+    /* Doubly linked list pointers. */
+    struct PyCodeObject *next;
+    struct PyCodeObject *prev;
 } PyCodeObject;
 
 /* Masks for co_flags above */

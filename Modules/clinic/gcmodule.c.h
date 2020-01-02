@@ -325,4 +325,61 @@ gc_get_freeze_count(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=21dc9270b10b7891 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(gc_get_stat_scanned__doc__,
+"get_stat_scanned($module, /)\n"
+"--\n"
+"\n"
+"Get the total number of objects scanned in all garbage collections.");
+
+#define GC_GET_STAT_SCANNED_METHODDEF    \
+    {"get_stat_scanned", (PyCFunction)gc_get_stat_scanned, METH_NOARGS, gc_get_stat_scanned__doc__},
+
+static Py_ssize_t
+gc_get_stat_scanned_impl(PyObject *module);
+
+static PyObject *
+gc_get_stat_scanned(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t _return_value;
+
+    _return_value = gc_get_stat_scanned_impl(module);
+    if ((_return_value == -1) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyLong_FromSsize_t(_return_value);
+
+exit:
+    return return_value;
+}
+
+PyDoc_STRVAR(gc_reward__doc__,
+"reward($module, value, /)\n"
+"--\n"
+"\n"
+"Update garbage collection policy using the provided reward.\n"
+"\n"
+"The reward must be within 0 to 1 inclusive.");
+
+#define GC_REWARD_METHODDEF    \
+    {"reward", (PyCFunction)gc_reward, METH_O, gc_reward__doc__},
+
+static PyObject *
+gc_reward_impl(PyObject *module, double value);
+
+static PyObject *
+gc_reward(PyObject *module, PyObject *arg)
+{
+    PyObject *return_value = NULL;
+    double value;
+
+    if (!PyArg_Parse(arg, "d:reward", &value)) {
+        goto exit;
+    }
+    return_value = gc_reward_impl(module, value);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=e146052a0d2346b4 input=a9049054013a1b77]*/
