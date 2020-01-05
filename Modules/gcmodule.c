@@ -106,6 +106,8 @@ static struct DQNState {
     uint64_t replay_index;
     // The number of evaluations.
     uint64_t evaluations;
+    // The number of objects seen.
+    uint64_t objects;
 } dqn_state;
 
 /*** Begin DQN functions. ***/
@@ -120,16 +122,20 @@ static uint64_t dqn_rand_int(uint64_t start, uint64_t end) {
     return (rand() % (end - start)) + start;
 }
 
-// Pushes a frame into reply memory. The reward is set later.
-static void dqn_replay_push(struct gc_learning_stats *stats, uint8_t action) {
+// Converts statistics from GC to an observation.
+static DQNObservation dqn_to_observation(struct gc_learning_stats *stats) {
     // Extract relevant information.
     DQNObservation observation;
     observation.memory = stats->memory;
     observation.instruction = stats->instruction;
+    return observation;
+}
 
+// Pushes a frame into reply memory. The reward is set later.
+static void dqn_replay_push(DQNObservation *observation, uint8_t action) {
     // Create transition.
     DQNTransition transition;
-    transition.sequence = observation;
+    transition.sequence = *observation;
     transition.reward = 0;
     transition.action = action;
 
@@ -138,6 +144,7 @@ static void dqn_replay_push(struct gc_learning_stats *stats, uint8_t action) {
     dqn_state.replay[index] = transition;
 }
 
+// The the previous replay associated with a given index.
 static DQNTransition *dqn_previous_replay(uint64_t index) {
     uint64_t previous_index = (index - 1) % dqn_state.replay_capacity;
     return &(dqn_state.replay[previous_index]);
@@ -1044,20 +1051,38 @@ clear_freelists(void)
 
 /* Method for learning GC to determine which generation to collect, or -1 for no collection. */
 static int _Py_HOT_FUNCTION
-learning_predict(struct gc_learning_stats stats) {
-    // Determine whether we should use DQN.
+learning_predict(struct gc_learning_stats *stats) {
+    // Determine whether we should use DQN. Otherwise, use the default GC.
     if (dqn_state.replay_index > 0) {
-        return dqn_select_action()
+        // Determine whether it is time to use the policy function.
+        if (dqn_state.objects++ % dqn_config.skip != 0) {
+            return -1;
+        }
+
+        // Get the action and store to replay.
+        DQNObservation observation = dqn_to_observation(stats);
+        uint8_t action = dqn_select_action(&observation);
+        dqn_replay_push(&observation, action);
+
+        // Train on mini-batch.
+        dqn_train();
+
+        // Convert to GC action.
+        if (action == 0) {
+            return -1;
+        } else {
+            return 2;
+        }
     }
 
     /* If the count of generation 0 does not exceed the threshold, do nothing. */
-    if (stats.count[0] <= (unsigned int) _PyRuntime.gc.generations[0].threshold) {
+    if (stats->count[0] <= (unsigned int) _PyRuntime.gc.generations[0].threshold) {
         return -1;
     }
 
     /* Determine which generation to collect. */
     for (int i = NUM_GENERATIONS - 1; i >= 1; i--) {
-        if (stats.count[i] > (unsigned int) _PyRuntime.gc.generations[i].threshold) {
+        if (stats->count[i] > (unsigned int) _PyRuntime.gc.generations[i].threshold) {
             if (i == NUM_GENERATIONS - 1 && _PyRuntime.gc.long_lived_pending < _PyRuntime.gc.long_lived_total / 4) {
                 continue;
             }
@@ -1069,25 +1094,25 @@ learning_predict(struct gc_learning_stats stats) {
     return 0;
 }
 
-/* Method for learning GC to be rewarded after collection. */
-static void
-learning_reward(struct gc_learning_stats before, struct gc_learning_stats after) {
-}
-
-/* Update learning stats. */
+// Update learning stats.
 static void _Py_HOT_FUNCTION
 update_learning_stats() {
+    // Update count and size for each generation.
     for (int i = 0; i < NUM_GENERATIONS; i++) {
         _PyRuntime.gc.learning_stats.count[i] = _PyRuntime.gc.generations[i].count;
         _PyRuntime.gc.learning_stats.size[i] = _PyRuntime.gc.generation_stats[i].size;
     }
+
+    // Update the memory usage.
     _PyRuntime.gc.learning_stats.memory = memory_usage;
-     PyThreadState *tstate = PyThreadState_GET();
-     if (tstate->frame != NULL) {
-         _PyRuntime.gc.learning_stats.code = tstate->frame->f_code->co_id;
-         if (tstate->frame->f_lasti >= 0) {
-             _PyRuntime.gc.learning_stats.instruction = tstate->frame->f_code->co_id +
-                     tstate->frame->f_lasti / sizeof(_Py_CODEUNIT);
+
+    // Update the code and instruction locations.
+     PyThreadState *ts = PyThreadState_GET();
+     if (ts->frame != NULL) {
+         _PyRuntime.gc.learning_stats.code = ts->frame->f_code->co_id;
+         if (ts->frame->f_lasti >= 0) {
+             _PyRuntime.gc.learning_stats.instruction = ts->frame->f_code->co_id +
+                                                        ts->frame->f_lasti / sizeof(_Py_CODEUNIT);
          }
      }
 }
@@ -1109,9 +1134,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     _PyTime_t t1 = 0;   /* initialize to prevent a compiler warning */
 
     struct gc_generation_stats *stats = &_PyRuntime.gc.generation_stats[generation];
-
-    /* Take a snapshot of learning stats before collection. */
-    struct gc_learning_stats learning_before = _PyRuntime.gc.learning_stats;
 
     if (_PyRuntime.gc.debug & DEBUG_STATS) {
         PySys_WriteStderr("gc: time %.7f\n", _PyTime_AsSecondsDouble(_PyTime_GetSystemClock()));
@@ -1317,8 +1339,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     update_learning_stats();
     _PyRuntime.gc.learning_stats.collected[generation] = m;
     _PyRuntime.gc.learning_stats.generation = generation;
-    struct gc_learning_stats learning_after = _PyRuntime.gc.learning_stats;
-    learning_reward(learning_before, learning_after);
 
     if (PyDTrace_GC_DONE_ENABLED())
         PyDTrace_GC_DONE(n+m);
@@ -1813,6 +1833,32 @@ gc_get_freeze_count_impl(PyObject *module)
     return gc_list_size(&_PyRuntime.gc.permanent_generation.head);
 }
 
+/*[clinic input]
+gc.reward
+
+    value: double
+    /
+
+Set the reward for the DQN garbage collector.
+[clinic start generated code]*/
+
+static PyObject *
+gc_reward_impl(PyObject *module, double value)
+/*[clinic end generated code: output=efd2b9b189133062 input=d7564bfac59014cd]*/
+{
+    // For initial reward, initialize DQN state.
+    if (dqn_state.replay_index == 0) {
+        DQNObservation observation = dqn_to_observation(&_PyRuntime.gc.learning_stats);
+        dqn_replay_push(&observation, 0);
+    }
+
+    // Set last reward.
+    dqn_reward(value);
+
+    // Return none.
+    Py_RETURN_NONE;
+}
+
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
 "\n"
@@ -1832,7 +1878,9 @@ PyDoc_STRVAR(gc__doc__,
 "get_referents() -- Return the list of objects that an object refers to.\n"
 "freeze() -- Freeze all tracked objects and ignore them for future collections.\n"
 "unfreeze() -- Unfreeze all objects in the permanent generation.\n"
-"get_freeze_count() -- Return the number of objects in the permanent generation.\n");
+"get_freeze_count() -- Return the number of objects in the permanent generation.\n"
+"reward() -- Set the reward for DQN GC.\n"
+);
 
 static PyMethodDef GcMethods[] = {
     GC_ENABLE_METHODDEF
@@ -1854,6 +1902,7 @@ static PyMethodDef GcMethods[] = {
     GC_FREEZE_METHODDEF
     GC_UNFREEZE_METHODDEF
     GC_GET_FREEZE_COUNT_METHODDEF
+    GC_REWARD_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -2057,7 +2106,7 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
     if (_PyRuntime.gc.enabled && !_PyRuntime.gc.collecting && !PyErr_Occurred()) {
         update_learning_stats();
 
-        int generation = learning_predict(_PyRuntime.gc.learning_stats);
+        int generation = learning_predict(&_PyRuntime.gc.learning_stats);
         if (generation != -1) {
             _PyRuntime.gc.collecting = 1;
             collect_with_callback(generation);

@@ -325,4 +325,31 @@ gc_get_freeze_count(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=21dc9270b10b7891 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(gc_reward__doc__,
+"reward($module, value, /)\n"
+"--\n"
+"\n"
+"Set the reward for the DQN garbage collector.");
+
+#define GC_REWARD_METHODDEF    \
+    {"reward", (PyCFunction)gc_reward, METH_O, gc_reward__doc__},
+
+static PyObject *
+gc_reward_impl(PyObject *module, double value);
+
+static PyObject *
+gc_reward(PyObject *module, PyObject *arg)
+{
+    PyObject *return_value = NULL;
+    double value;
+
+    if (!PyArg_Parse(arg, "d:reward", &value)) {
+        goto exit;
+    }
+    return_value = gc_reward_impl(module, value);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=37ed055315ead317 input=a9049054013a1b77]*/
