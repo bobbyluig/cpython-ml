@@ -303,7 +303,7 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     dqn_config.replay_size = (dqn_replay_size != NULL) ? (uint64_t) atoll(dqn_replay_size) : (16ULL << 20U);
     dqn_config.learning_rate = (dqn_learning_rate != NULL) ? atof(dqn_learning_rate) : 0.1f;
     dqn_config.epsilon_start = (dqn_epsilon_start != NULL) ? atof(dqn_epsilon_start) : 1.0f;
-    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.0001f;
+    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.0f;
     dqn_config.epsilon_decay = (dqn_epsilon_decay != NULL) ? atof(dqn_epsilon_decay) : 100000.0f;
     dqn_config.gamma = (dqn_gamma != NULL) ? atof(dqn_gamma) : 0.999f;
     dqn_config.skip = (dqn_skip != NULL) ? (uint64_t) atoll(dqn_skip) : 10ULL;
@@ -1073,9 +1073,6 @@ learning_predict(struct gc_learning_stats *stats) {
         DQNObservation observation = dqn_to_observation(stats);
         uint8_t action = dqn_select_action(&observation);
         dqn_replay_push(&observation, action);
-
-        // Train on mini-batch.
-        dqn_train();
 
         // Convert to GC action.
         if (action == 0) {
@@ -1861,14 +1858,25 @@ static PyObject *
 gc_reward_impl(PyObject *module, double value)
 /*[clinic end generated code: output=efd2b9b189133062 input=d7564bfac59014cd]*/
 {
-    // For initial reward, initialize DQN state.
-    if (dqn_state.replay_index == 0) {
-        DQNObservation observation = dqn_to_observation(&_PyRuntime.gc.learning_stats);
-        dqn_replay_push(&observation, 0);
+    // Train if not first call.
+    if (dqn_state.replay_index != 0) {
+        // Apply reward to all previous observations.
+        for (uint64_t i = 1; i < Py_MIN(dqn_state.replay_index, dqn_state.replay_capacity); i++) {
+            dqn_state.replay[i].reward = value;
+        }
+
+        // Do some training.
+        for (uint64_t i = 1; i < Py_MIN(dqn_state.replay_index, dqn_state.replay_capacity); i++) {
+            dqn_train();
+        }
+
+        // Reset.
+        dqn_state.replay_index = 0;
     }
 
-    // Set last reward.
-    dqn_reward(value);
+    // Add the current observation.
+    DQNObservation observation = dqn_to_observation(&_PyRuntime.gc.learning_stats);
+    dqn_replay_push(&observation, 0);
 
     // Return none.
     Py_RETURN_NONE;
