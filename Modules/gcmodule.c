@@ -48,8 +48,14 @@ module gc
 /* Python string to use if unhandled exception occurs */
 static PyObject *gc_str = NULL;
 
-/* Memory usage for learning GC. */
+// Memory usage for learning GC.
 size_t memory_usage = 0;
+
+// Global ID for instruction location.
+uint64_t global_id = 0;
+
+// Objects scanned for learning GC.
+static size_t objects_scanned = 0;
 
 // DQN configuration.
 #define DQN_NUM_FEATURES 2
@@ -165,10 +171,10 @@ static uint64_t dqn_sample_index() {
 
 // Evaluates the policy function and returns the index of the best output.
 static uint8_t dqn_evaluate(DQNObservation *observation) {
-    // Set ANN input.
+    // Set ANN input and normalize to [0, 1].
     double inputs[DQN_INPUT_SIZE];
-    inputs[0] = (double) observation->instruction;
-    inputs[1] = (double) observation->memory;
+    inputs[0] = (double) observation->instruction / global_id;
+    inputs[1] = (double) observation->memory / (16ULL << 30U);
 
     // Evaluate the ANN.
     const double *output = genann_run(dqn_state.ann, inputs);
@@ -186,7 +192,7 @@ static uint8_t dqn_evaluate(DQNObservation *observation) {
 // Selects an action based on the observation.
 static uint8_t dqn_select_action(DQNObservation *observation) {
     // Compute threshold.
-    double eps_threshold = dqn_config.epsilon_end + (dqn_config.epsilon_end - dqn_config.epsilon_start)
+    double eps_threshold = dqn_config.epsilon_end + (dqn_config.epsilon_start - dqn_config.epsilon_end)
             * exp(-1.0 * dqn_state.evaluations++ / dqn_config.epsilon_decay);
 
     // Determine if we should use the model or choose a random action.
@@ -217,10 +223,14 @@ static void dqn_train() {
                 ? reward
                 : dqn_config.gamma * dqn_state.ann->output[dqn_evaluate(&observation_after)];
 
-        // Set ANN input.
+        // Value must be in [0, 1].
+        if (y < 0) y = 0;
+        if (y > 1) y = 1;
+
+        // Set ANN input and normalize to [0, 1].
         double inputs[DQN_INPUT_SIZE];
-        inputs[0] = (double) observation_before.instruction;
-        inputs[1] = (double) observation_before.memory;
+        inputs[0] = (double) observation_before.instruction / global_id;
+        inputs[1] = (double) observation_before.memory / (16ULL << 30U);
 
         // Evaluate the ANN on the old state.
         const double *output = genann_run(dqn_state.ann, inputs);
@@ -290,11 +300,11 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     const char *dqn_gamma = Py_GETENV("DQN_GAMMA");
     const char *dqn_skip = Py_GETENV("DQN_SKIP");
     const char *dqn_batch_size = Py_GETENV("DQN_BATCH_SIZE");
-    dqn_config.replay_size = (dqn_replay_size != NULL) ? (uint64_t) atoll(dqn_replay_size) : (1ULL << (20U + 16));
-    dqn_config.learning_rate = (dqn_learning_rate != NULL) ? atof(dqn_learning_rate) : 0.5f;
+    dqn_config.replay_size = (dqn_replay_size != NULL) ? (uint64_t) atoll(dqn_replay_size) : (16ULL << 20U);
+    dqn_config.learning_rate = (dqn_learning_rate != NULL) ? atof(dqn_learning_rate) : 0.1f;
     dqn_config.epsilon_start = (dqn_epsilon_start != NULL) ? atof(dqn_epsilon_start) : 1.0f;
-    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.01f;
-    dqn_config.epsilon_decay = (dqn_epsilon_decay != NULL) ? atof(dqn_epsilon_decay) : 1000.0f;
+    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.0001f;
+    dqn_config.epsilon_decay = (dqn_epsilon_decay != NULL) ? atof(dqn_epsilon_decay) : 100000.0f;
     dqn_config.gamma = (dqn_gamma != NULL) ? atof(dqn_gamma) : 0.999f;
     dqn_config.skip = (dqn_skip != NULL) ? (uint64_t) atoll(dqn_skip) : 10ULL;
     dqn_config.batch_size = (dqn_batch_size != NULL) ? (uint64_t) atoll(dqn_batch_size) : 32ULL;
@@ -1179,6 +1189,11 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
             ? generation + 1
             : generation;
 
+    // Update objects scanned.
+    for (i = 0; i < generation; i++) {
+        objects_scanned += _PyRuntime.gc.learning_stats.size[i];
+    }
+
     /* Using ob_refcnt and gc_refs, calculate which objects in the
      * container set are reachable from outside the set (i.e., have a
      * refcount greater than 0 when all the references within the
@@ -1859,6 +1874,19 @@ gc_reward_impl(PyObject *module, double value)
     Py_RETURN_NONE;
 }
 
+/*[clinic input]
+gc.objects_scanned -> Py_ssize_t
+
+Return the number of objects scanned during garbage collection.
+[clinic start generated code]*/
+
+static Py_ssize_t
+gc_objects_scanned_impl(PyObject *module)
+/*[clinic end generated code: output=c5d34983275e0ab3 input=72c0a6619bb9466b]*/
+{
+    return objects_scanned;
+}
+
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
 "\n"
@@ -1880,6 +1908,7 @@ PyDoc_STRVAR(gc__doc__,
 "unfreeze() -- Unfreeze all objects in the permanent generation.\n"
 "get_freeze_count() -- Return the number of objects in the permanent generation.\n"
 "reward() -- Set the reward for DQN GC.\n"
+"objects_scanned() -- The number of objects collected during GC.\n"
 );
 
 static PyMethodDef GcMethods[] = {
@@ -1903,6 +1932,7 @@ static PyMethodDef GcMethods[] = {
     GC_UNFREEZE_METHODDEF
     GC_GET_FREEZE_COUNT_METHODDEF
     GC_REWARD_METHODDEF
+    GC_OBJECTS_SCANNED_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 

@@ -352,4 +352,32 @@ gc_reward(PyObject *module, PyObject *arg)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=37ed055315ead317 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(gc_objects_scanned__doc__,
+"objects_scanned($module, /)\n"
+"--\n"
+"\n"
+"Return the number of objects scanned during garbage collection.");
+
+#define GC_OBJECTS_SCANNED_METHODDEF    \
+    {"objects_scanned", (PyCFunction)gc_objects_scanned, METH_NOARGS, gc_objects_scanned__doc__},
+
+static Py_ssize_t
+gc_objects_scanned_impl(PyObject *module);
+
+static PyObject *
+gc_objects_scanned(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t _return_value;
+
+    _return_value = gc_objects_scanned_impl(module);
+    if ((_return_value == -1) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyLong_FromSsize_t(_return_value);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=8b1a79fb9221dbbe input=a9049054013a1b77]*/

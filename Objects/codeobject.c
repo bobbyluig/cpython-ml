@@ -4,8 +4,8 @@
 #include "code.h"
 #include "structmember.h"
 
-/* Counter for id */
-static uint64_t global_id = 0;
+// Global counter for ID.
+extern uint64_t global_id;
 
 /* Holder for co_extra information */
 typedef struct {
