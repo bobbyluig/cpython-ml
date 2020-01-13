@@ -1866,9 +1866,7 @@ gc_reward_impl(PyObject *module, double value)
         }
 
         // Do some training.
-        for (uint64_t i = 1; i < Py_MIN(dqn_state.replay_index, dqn_state.replay_capacity); i++) {
-            dqn_train();
-        }
+        dqn_train();
 
         // Reset.
         dqn_state.replay_index = 0;
