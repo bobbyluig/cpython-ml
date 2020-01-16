@@ -50,13 +50,17 @@ static PyObject *gc_str = NULL;
 // Memory usage for learning GC.
 size_t memory = 0;
 
-// Struct for UCB entry in the hashtable.
-typedef struct UCBEntry {
-    // Empirical mean of each arm.
-    double *means;
-    // The number of times each arm has been pulled.
-    uint64_t *counts;
-} UCBEntry;
+// Struct for UCB arm.
+typedef struct UCBArm {
+    // The instruction.
+    uint64_t instruction;
+    // The probability.
+    double probability;
+    // The empirical mean.
+    double mean;
+    // The number of times this arm has been pulled.
+    double count;
+} UCBArm;
 
 // Struct for UCB configuration.
 static struct UCBConfig {
@@ -68,23 +72,52 @@ static struct UCBConfig {
 
 // Struct for UCB state.
 static struct UCBState {
-    // Dictionary to keep track of locations and probabilities.
+    // Dictionary to keep track of locations.
     _Py_hashtable_t *table;
+    // The number of rewards received.
+    uint64_t rewards;
+    // The number of arms.
+    uint64_t arms_count;
+    // The current arm index.
+    uint64_t arm_index;
+    // The arms.
+    UCBArm *arms;
+    // Whether greedy arm selection is enabled.
+    int greedy;
 } ucb_state;
 
 /* Tuning statistics */
 static uint64_t objects_scanned = 0;
 
-/* set for debugging information */
-#define DEBUG_STATS             (1<<0) /* print collection statistics */
-#define DEBUG_COLLECTABLE       (1<<1) /* print collectable objects */
-#define DEBUG_UNCOLLECTABLE     (1<<2) /* print uncollectable objects */
-#define DEBUG_SAVEALL           (1<<5) /* save all garbage in gc.garbage */
-#define DEBUG_LEAK              DEBUG_COLLECTABLE | \
-                DEBUG_UNCOLLECTABLE | \
-                DEBUG_SAVEALL
+/*** Begin UCB functions. ***/
 
-#define GEN_HEAD(n) (&_PyRuntime.gc.generations[n].head)
+// Initialize all arms associated with an instruction.
+static int
+ucb_initialize_instruction_arms(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data)
+{
+    // Read the key.
+    uint64_t key;
+    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, key);
+
+    // Get the index.
+    uint64_t index = ucb_state.arm_index;
+    ucb_state.arm_index += ucb_config.steps;
+
+    // Initialize for all probabilities.
+    for (uint64_t i = 0; i < ucb_config.steps; i++) {
+        ucb_state.arms[index].instruction = key;
+        ucb_state.arms[index].count = 0;
+        ucb_state.arms[index].mean = 0;
+        ucb_state.arms[index].probability = ucb_config.step_size * i;
+    }
+
+    return 0;
+}
+
+// Returns a random float in [0, 1).
+static double ucb_rand_float() {
+    return ((double) rand() / ((double) RAND_MAX + 1));
+}
 
 // Hash function for UCB table keys.
 static Py_uhash_t
@@ -100,12 +133,21 @@ hashtable_hash_ucb_key(_Py_hashtable_t *ht, const void *pkey)
 static int
 hashtable_compare_ucb_value(_Py_hashtable_t *ht, const void *pkey, const _Py_hashtable_entry_t *entry)
 {
-    UCBEntry entry1, entry2;
-    _Py_HASHTABLE_READ_KEY(ht, pkey, entry1);
-    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, entry2);
-
-    return entry1.counts == entry2.counts && entry1.means == entry2.means;
+    return 1;
 }
+
+/*** End UCB functions. ***/
+
+/* set for debugging information */
+#define DEBUG_STATS             (1<<0) /* print collection statistics */
+#define DEBUG_COLLECTABLE       (1<<1) /* print collectable objects */
+#define DEBUG_UNCOLLECTABLE     (1<<2) /* print uncollectable objects */
+#define DEBUG_SAVEALL           (1<<5) /* save all garbage in gc.garbage */
+#define DEBUG_LEAK              DEBUG_COLLECTABLE | \
+                DEBUG_UNCOLLECTABLE | \
+                DEBUG_SAVEALL
+
+#define GEN_HEAD(n) (&_PyRuntime.gc.generations[n].head)
 
 void
 _PyGC_Initialize(struct _gc_runtime_state *state)
@@ -141,8 +183,16 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     ucb_config.step_size = 1.0 / (ucb_config.steps - 1);
 
     // Initialize UCB state.
-    ucb_state.table = _Py_hashtable_new(sizeof(uint64_t), sizeof(UCBEntry),
+    ucb_state.table = _Py_hashtable_new(sizeof(uint64_t), sizeof(uint64_t),
                                         hashtable_hash_ucb_key, hashtable_compare_ucb_value);
+    ucb_state.rewards = 0;
+    ucb_state.arms_count = 0;
+    ucb_state.arm_index = 0;
+    ucb_state.arms = NULL;
+    ucb_state.greedy = 0;
+
+    // Seed RNG.
+    srand(time(NULL));
 
     // Initialize learning stats.
     struct gc_learning_stats learning_stats = {};
@@ -886,14 +936,32 @@ clear_freelists(void)
 /* Method for learning GC to determine which generation to collect, or -1 for no collection. */
 static int _Py_HOT_FUNCTION
 learning_predict(struct gc_learning_stats stats) {
-    /* If the count of generation 0 does not exceed the threshold, do nothing. */
-    if (stats.count[0] <= _PyRuntime.gc.generations[0].threshold) {
+    // Decide whether to use learning GC.
+    if (ucb_state.rewards >= 2) {
+        // If we are at the instruction, collect with the given probability.
+        if (stats.instruction == ucb_state.arms[ucb_state.arm_index].instruction
+            && ucb_rand_float() < ucb_state.arms[ucb_state.arm_index].probability) {
+            return -1;
+        } else {
+            return 2;
+        }
+    }
+
+    // Collect locations if necessary.
+    if (ucb_state.rewards == 1) {
+        uint64_t key = stats.instruction;
+        uint64_t data = 0;
+        _Py_HASHTABLE_SET(ucb_state.table, key, data);
+    }
+
+    // If the count of generation 0 does not exceed the threshold, do nothing.
+    if (stats.count[0] <= (unsigned int) _PyRuntime.gc.generations[0].threshold) {
         return -1;
     }
 
-    /* Determine which generation to collect. */
+    // Determine which generation to collect.
     for (int i = NUM_GENERATIONS - 1; i >= 1; i--) {
-        if (stats.count[i] > _PyRuntime.gc.generations[i].threshold) {
+        if (stats.count[i] > (unsigned int) _PyRuntime.gc.generations[i].threshold) {
             if (i == NUM_GENERATIONS - 1 && _PyRuntime.gc.long_lived_pending < _PyRuntime.gc.long_lived_total / 4) {
                 continue;
             }
@@ -905,12 +973,7 @@ learning_predict(struct gc_learning_stats stats) {
     return 0;
 }
 
-/* Method for learning GC to be rewarded after collection. */
-static void
-learning_reward(struct gc_learning_stats before, struct gc_learning_stats after) {
-}
-
-/* Update learning stats. */
+// Update learning stats.
 static void _Py_HOT_FUNCTION
 update_learning_stats() {
     for (int i = 0; i < NUM_GENERATIONS; i++) {
@@ -945,9 +1008,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     _PyTime_t t1 = 0;   /* initialize to prevent a compiler warning */
 
     struct gc_generation_stats *stats = &_PyRuntime.gc.generation_stats[generation];
-
-    /* Take a snapshot of learning stats before collection. */
-    struct gc_learning_stats learning_before = _PyRuntime.gc.learning_stats;
 
     if (_PyRuntime.gc.debug & DEBUG_STATS) {
         PySys_WriteStderr("gc: time %.7f\n", _PyTime_AsSecondsDouble(_PyTime_GetSystemClock()));
@@ -992,6 +1052,11 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     int next_generation = (generation < NUM_GENERATIONS - 1)
             ? generation + 1
             : generation;
+
+    // Update objects scanned.
+    for (i = 0; i < generation; i++) {
+        objects_scanned += _PyRuntime.gc.learning_stats.size[i];
+    }
 
     /* Using ob_refcnt and gc_refs, calculate which objects in the
      * container set are reachable from outside the set (i.e., have a
@@ -1148,13 +1213,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     stats->collections++;
     stats->collected += m;
     stats->uncollectable += n;
-
-    /* Take a snapshot of learning stats after collection and call reward. */
-    update_learning_stats();
-    _PyRuntime.gc.learning_stats.collected[generation] = m;
-    _PyRuntime.gc.learning_stats.generation = generation;
-    struct gc_learning_stats learning_after = _PyRuntime.gc.learning_stats;
-    learning_reward(learning_before, learning_after);
 
     if (PyDTrace_GC_DONE_ENABLED())
         PyDTrace_GC_DONE(n+m);
@@ -1649,6 +1707,100 @@ gc_get_freeze_count_impl(PyObject *module)
     return gc_list_size(&_PyRuntime.gc.permanent_generation.head);
 }
 
+/*[clinic input]
+gc.reward
+
+    value: double
+    /
+
+Set the reward for the DQN garbage collector.
+[clinic start generated code]*/
+
+static PyObject *
+gc_reward_impl(PyObject *module, double value)
+/*[clinic end generated code: output=efd2b9b189133062 input=d7564bfac59014cd]*/
+{
+    // Received a reward.
+    ucb_state.rewards++;
+
+    // First reward is initialization.
+    if (ucb_state.rewards == 1) {
+        // Nothing to do. Return.
+        Py_RETURN_NONE;
+    }
+
+    // Second reward initializes all arms.
+    if (ucb_state.rewards == 2) {
+        // Compute the number of arms.
+        ucb_state.arms_count = ucb_state.table->entries * ucb_config.steps;
+
+        // Allocate space for arms.
+        ucb_state.arms = PyMem_Malloc(sizeof(UCBArm) * ucb_state.arms_count);
+
+        // Go through the hashtable.
+        _Py_hashtable_foreach(ucb_state.table, ucb_initialize_instruction_arms, NULL);
+
+        // The table is no longer needed.
+        _Py_hashtable_destroy(ucb_state.table);
+
+        // Pick the first arm.
+        ucb_state.arm_index = 0;
+
+        // No reward yet. Return.
+        Py_RETURN_NONE;
+    }
+
+    // Compute the average reward for the current arm.
+    uint64_t n = ++ucb_state.arms[ucb_state.arm_index].count;
+    double old_m = ucb_state.arms[ucb_state.arm_index].mean;
+    ucb_state.arms[ucb_state.arm_index].mean = old_m + (value - old_m) / n;
+
+    // Explore all arms once initially.
+    if (!ucb_state.greedy) {
+        // Explore next arm.
+        ucb_state.arm_index++;
+
+        // Switch to greedy once all arms are explored.
+        if (ucb_state.arm_index == ucb_state.arms_count) {
+            ucb_state.greedy = 1;
+        }
+    } else {
+        // Keep track of best value.
+        double best_value = -INFINITY;
+
+        // UCB greedy.
+        for (uint64_t i = 0; i < ucb_state.arms_count; i++) {
+            // Compute value.
+            uint64_t u_i = ucb_state.arms[ucb_state.arm_index].mean;
+            uint64_t n_i = ucb_state.arms[ucb_state.arms_count].count;
+            uint64_t t = ucb_state.rewards - 1;
+            double value = u_i + sqrt(2.0 * log(t) / n_i);
+
+            // Update best value and index.
+            if (value > best_value) {
+                best_value = value;
+                ucb_state.arm_index = i;
+            }
+        }
+    }
+
+    // Return none.
+    Py_RETURN_NONE;
+}
+
+/*[clinic input]
+gc.objects_scanned -> Py_ssize_t
+
+Return the number of objects scanned during garbage collection.
+[clinic start generated code]*/
+
+static Py_ssize_t
+gc_objects_scanned_impl(PyObject *module)
+/*[clinic end generated code: output=c5d34983275e0ab3 input=72c0a6619bb9466b]*/
+{
+    return objects_scanned;
+}
+
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
 "\n"
@@ -1669,6 +1821,8 @@ PyDoc_STRVAR(gc__doc__,
 "freeze() -- Freeze all tracked objects and ignore them for future collections.\n"
 "unfreeze() -- Unfreeze all objects in the permanent generation.\n"
 "get_freeze_count() -- Return the number of objects in the permanent generation.\n"
+"reward() -- Set the reward for UCB GC.\n"
+"objects_scanned() -- The number of objects collected during GC.\n"
 );
 
 static PyMethodDef GcMethods[] = {
@@ -1691,6 +1845,8 @@ static PyMethodDef GcMethods[] = {
     GC_FREEZE_METHODDEF
     GC_UNFREEZE_METHODDEF
     GC_GET_FREEZE_COUNT_METHODDEF
+    GC_REWARD_METHODDEF
+    GC_OBJECTS_SCANNED_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -1886,7 +2042,7 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
     _PyGCHead_SET_REFS(g, GC_UNTRACKED);
     _PyRuntime.gc.generations[0].count++; /* number of allocated GC objects */
 
-    /* Determine if collection should occur and which generation to collect. */
+    // Determine if collection should occur and which generation to collect.
     if (_PyRuntime.gc.enabled && !_PyRuntime.gc.collecting && !PyErr_Occurred()) {
         update_learning_stats();
 
