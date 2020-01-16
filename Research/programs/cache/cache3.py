@@ -35,6 +35,6 @@ if __name__ == '__main__':
     while True:
         start = time.time()
         operation()
-        r = 1 / (1 + time.time() - start)
+        r = 1 - 1 / (1 + time.time() - start)
         print(r)
         gc.reward(r)

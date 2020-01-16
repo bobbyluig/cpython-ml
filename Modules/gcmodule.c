@@ -68,6 +68,8 @@ static struct UCBConfig {
     uint32_t steps;
     // The step size. Computed from steps.
     double step_size;
+    // The number of objects to skip before performing evaluation.
+    uint64_t skip;
 } ucb_config;
 
 // Struct for UCB state.
@@ -82,6 +84,8 @@ static struct UCBState {
     uint64_t arm_index;
     // The arms.
     UCBArm *arms;
+    // The number of objects seen.
+    uint64_t objects;
     // Whether greedy arm selection is enabled.
     int greedy;
 } ucb_state;
@@ -105,10 +109,10 @@ ucb_initialize_instruction_arms(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entr
 
     // Initialize for all probabilities.
     for (uint64_t i = 0; i < ucb_config.steps; i++) {
-        ucb_state.arms[index].instruction = key;
-        ucb_state.arms[index].count = 0;
-        ucb_state.arms[index].mean = 0;
-        ucb_state.arms[index].probability = ucb_config.step_size * i;
+        ucb_state.arms[index + i].instruction = key;
+        ucb_state.arms[index + i].count = 0;
+        ucb_state.arms[index + i].mean = 0;
+        ucb_state.arms[index + i].probability = ucb_config.step_size * i;
     }
 
     return 0;
@@ -178,9 +182,11 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     };
 
     // Set UCB configuration.
-    const char *steps = Py_GETENV("RESEARCH_STEPS");
-    ucb_config.steps = (steps != NULL) ? atoi(steps) : 5;
+    const char *ucb_steps = Py_GETENV("UCB_STEPS");
+    const char *ucb_skip = Py_GETENV("UCB_SKIP");
+    ucb_config.steps = (ucb_steps != NULL) ? atoi(ucb_steps) : 5;
     ucb_config.step_size = 1.0 / (ucb_config.steps - 1);
+    ucb_config.skip = (ucb_skip != NULL) ? (uint64_t) atoll(ucb_skip) : 10ULL;
 
     // Initialize UCB state.
     ucb_state.table = _Py_hashtable_new(sizeof(uint64_t), sizeof(uint64_t),
@@ -189,6 +195,7 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     ucb_state.arms_count = 0;
     ucb_state.arm_index = 0;
     ucb_state.arms = NULL;
+    ucb_state.objects = 0;
     ucb_state.greedy = 0;
 
     // Seed RNG.
@@ -938,12 +945,17 @@ static int _Py_HOT_FUNCTION
 learning_predict(struct gc_learning_stats stats) {
     // Decide whether to use learning GC.
     if (ucb_state.rewards >= 2) {
+        // Determine whether it is time to use the policy function.
+        if (ucb_state.objects++ % ucb_config.skip != 0) {
+            return -1;
+        }
+
         // If we are at the instruction, collect with the given probability.
         if (stats.instruction == ucb_state.arms[ucb_state.arm_index].instruction
             && ucb_rand_float() < ucb_state.arms[ucb_state.arm_index].probability) {
-            return -1;
-        } else {
             return 2;
+        } else {
+            return -1;
         }
     }
 
@@ -951,7 +963,11 @@ learning_predict(struct gc_learning_stats stats) {
     if (ucb_state.rewards == 1) {
         uint64_t key = stats.instruction;
         uint64_t data = 0;
-        _Py_HASHTABLE_SET(ucb_state.table, key, data);
+
+        _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(ucb_state.table, key);
+        if (entry == NULL) {
+            _Py_HASHTABLE_SET(ucb_state.table, key, data);
+        }
     }
 
     // If the count of generation 0 does not exceed the threshold, do nothing.
@@ -969,7 +985,7 @@ learning_predict(struct gc_learning_stats stats) {
         }
     }
 
-    /* The first generation should be collected */
+    // The first generation should be collected.
     return 0;
 }
 
@@ -1734,6 +1750,9 @@ gc_reward_impl(PyObject *module, double value)
         // Compute the number of arms.
         ucb_state.arms_count = ucb_state.table->entries * ucb_config.steps;
 
+        // Debug info.
+        fprintf(stderr, "arms_count: %lu\n", ucb_state.arms_count);
+
         // Allocate space for arms.
         ucb_state.arms = PyMem_Malloc(sizeof(UCBArm) * ucb_state.arms_count);
 
@@ -1746,14 +1765,24 @@ gc_reward_impl(PyObject *module, double value)
         // Pick the first arm.
         ucb_state.arm_index = 0;
 
+        // Debug info.
+        fprintf(stderr, "all arms initialized\n");
+        fprintf(stderr, "selected: %lu, %f\n", ucb_state.arms[ucb_state.arm_index].instruction,
+                ucb_state.arms[ucb_state.arm_index].probability);
+
         // No reward yet. Return.
         Py_RETURN_NONE;
     }
 
     // Compute the average reward for the current arm.
-    uint64_t n = ++ucb_state.arms[ucb_state.arm_index].count;
-    double old_m = ucb_state.arms[ucb_state.arm_index].mean;
-    ucb_state.arms[ucb_state.arm_index].mean = old_m + (value - old_m) / n;
+    if (ucb_state.arms[ucb_state.arm_index].count == 0) {
+        ucb_state.arms[ucb_state.arm_index].mean = value;
+        ucb_state.arms[ucb_state.arm_index].count = 1;
+    } else {
+        uint64_t n = ++ucb_state.arms[ucb_state.arm_index].count;
+        double old_m = ucb_state.arms[ucb_state.arm_index].mean;
+        ucb_state.arms[ucb_state.arm_index].mean = old_m + (value - old_m) / n;
+    }
 
     // Explore all arms once initially.
     if (!ucb_state.greedy) {
@@ -1763,6 +1792,9 @@ gc_reward_impl(PyObject *module, double value)
         // Switch to greedy once all arms are explored.
         if (ucb_state.arm_index == ucb_state.arms_count) {
             ucb_state.greedy = 1;
+
+            // Debug info.
+            fprintf(stderr, "all arms explored\n");
         }
     } else {
         // Keep track of best value.
@@ -1771,18 +1803,22 @@ gc_reward_impl(PyObject *module, double value)
         // UCB greedy.
         for (uint64_t i = 0; i < ucb_state.arms_count; i++) {
             // Compute value.
-            uint64_t u_i = ucb_state.arms[ucb_state.arm_index].mean;
-            uint64_t n_i = ucb_state.arms[ucb_state.arms_count].count;
+            uint64_t u_i = ucb_state.arms[i].mean;
+            uint64_t n_i = ucb_state.arms[i].count;
             uint64_t t = ucb_state.rewards - 1;
-            double value = u_i + sqrt(2.0 * log(t) / n_i);
+            double j_t = u_i + sqrt(2.0 * log(t) / n_i);
 
             // Update best value and index.
-            if (value > best_value) {
-                best_value = value;
+            if (j_t > best_value) {
+                best_value = j_t;
                 ucb_state.arm_index = i;
             }
         }
     }
+
+    // Debug info.
+    fprintf(stderr, "selected: %lu, %f\n", ucb_state.arms[ucb_state.arm_index].instruction,
+            ucb_state.arms[ucb_state.arm_index].probability);
 
     // Return none.
     Py_RETURN_NONE;
@@ -1990,6 +2026,9 @@ void
 _PyGC_Fini(void)
 {
     Py_CLEAR(_PyRuntime.gc.callbacks);
+
+    // Cleanup UCB state.
+    PyMem_Free(ucb_state.arms);
 }
 
 /* for debugging */
