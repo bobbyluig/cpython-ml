@@ -47,28 +47,33 @@ module gc
 /* Python string to use if unhandled exception occurs */
 static PyObject *gc_str = NULL;
 
-/* Memory usage for learning GC. */
+// Memory usage for learning GC.
 size_t memory = 0;
 
-/* Dictionary to keep track of instruction hit count. */
-_Py_hashtable_t *hit_counts = NULL;
+// Struct for UCB entry in the hashtable.
+typedef struct UCBEntry {
+    // Empirical mean of each arm.
+    double *means;
+    // The number of times each arm has been pulled.
+    uint64_t *counts;
+} UCBEntry;
 
-/* Parameters for tuning. */
-static uint64_t parameter_instruction1 = 0;
-static uint64_t parameter_modulo1 = 0;
-static uint64_t parameter_generation1 = 0;
-static uint64_t parameter_instruction2 = 0;
-static uint64_t parameter_modulo2 = 0;
-static uint64_t parameter_generation2 = 0;
-static uint64_t parameter_verbose = 0;
+// Struct for UCB configuration.
+static struct UCBConfig {
+    // The number of steps to discretize probabilities between [0, 1].
+    uint32_t steps;
+    // The step size. Computed from steps.
+    double step_size;
+} ucb_config;
+
+// Struct for UCB state.
+static struct UCBState {
+    // Dictionary to keep track of locations and probabilities.
+    _Py_hashtable_t *table;
+} ucb_state;
 
 /* Tuning statistics */
-static uint64_t tuning_memory = 0;
-static uint64_t tuning_objects = 0;
-
-/* Verbose information */
-static PyObject *verbose_filename = NULL;
-static int verbose_lineno = 0;
+static uint64_t objects_scanned = 0;
 
 /* set for debugging information */
 #define DEBUG_STATS             (1<<0) /* print collection statistics */
@@ -81,26 +86,25 @@ static int verbose_lineno = 0;
 
 #define GEN_HEAD(n) (&_PyRuntime.gc.generations[n].head)
 
+// Hash function for UCB table keys.
 static Py_uhash_t
-hashtable_hash_uint64_t(_Py_hashtable_t *ht, const void *pkey)
+hashtable_hash_ucb_key(_Py_hashtable_t *ht, const void *pkey)
 {
     uint64_t value;
-
     _Py_HASHTABLE_READ_KEY(ht, pkey, value);
 
     return value;
 }
 
+// Comparator for UCB table values.
 static int
-hashtable_compare_uint64_t(_Py_hashtable_t *ht, const void *pkey,
-                            const _Py_hashtable_entry_t *entry)
+hashtable_compare_ucb_value(_Py_hashtable_t *ht, const void *pkey, const _Py_hashtable_entry_t *entry)
 {
-    uint64_t int1, int2;
+    UCBEntry entry1, entry2;
+    _Py_HASHTABLE_READ_KEY(ht, pkey, entry1);
+    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, entry2);
 
-    _Py_HASHTABLE_READ_KEY(ht, pkey, int1);
-    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, int2);
-
-    return int1 == int2;
+    return entry1.counts == entry2.counts && entry1.means == entry2.means;
 }
 
 void
@@ -131,26 +135,16 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
         state->generation_stats[i] = generation_stats;
     };
 
-    const char *instruction1 = Py_GETENV("RESEARCH_INSTRUCTION1");
-    const char *modulo1 = Py_GETENV("RESEARCH_MODULO1");
-    const char *generation1 = Py_GETENV("RESEARCH_GENERATION1");
-    const char *instruction2 = Py_GETENV("RESEARCH_INSTRUCTION2");
-    const char *modulo2 = Py_GETENV("RESEARCH_MODULO2");
-    const char *generation2 = Py_GETENV("RESEARCH_GENERATION2");
-    const char *verbose = Py_GETENV("RESEARCH_VERBOSE");
-    parameter_instruction1 = (instruction1 != NULL) ? atol(instruction1) : 0;
-    parameter_modulo1 = (modulo1 != NULL) ? atol(modulo1) : 0;
-    parameter_generation1 = (generation1 != NULL) ? atol(generation1) : 0;
-    parameter_instruction2 = (instruction2 != NULL) ? atol(instruction2) : 0;
-    parameter_modulo2 = (modulo2 != NULL) ? atol(modulo2) : 0;
-    parameter_generation2 = (generation2 != NULL) ? atol(generation2) : 0;
-    parameter_verbose = (verbose != NULL) ? atol(verbose) : 0;
+    // Set UCB configuration.
+    const char *steps = Py_GETENV("RESEARCH_STEPS");
+    ucb_config.steps = (steps != NULL) ? atoi(steps) : 5;
+    ucb_config.step_size = 1.0 / (ucb_config.steps - 1);
 
-    if (parameter_verbose) {
-        hit_counts = _Py_hashtable_new(sizeof(uint64_t), sizeof(uint64_t),
-                                       hashtable_hash_uint64_t, hashtable_compare_uint64_t);
-    }
+    // Initialize UCB state.
+    ucb_state.table = _Py_hashtable_new(sizeof(uint64_t), sizeof(UCBEntry),
+                                        hashtable_hash_ucb_key, hashtable_compare_ucb_value);
 
+    // Initialize learning stats.
     struct gc_learning_stats learning_stats = {};
     for (int i = 0; i < NUM_GENERATIONS; i++) {
         learning_stats.size[i] = 0;
@@ -892,46 +886,6 @@ clear_freelists(void)
 /* Method for learning GC to determine which generation to collect, or -1 for no collection. */
 static int _Py_HOT_FUNCTION
 learning_predict(struct gc_learning_stats stats) {
-    /* The number of times the target bytecode has been hit. */
-    static uint64_t hit1 = 0;
-    static uint64_t hit2 = 0;
-
-    /* Update hit counter appropriately. */
-    if (stats.instruction == parameter_instruction1) {
-        hit1++;
-
-        // Update verbose file and line.
-        if (parameter_verbose && verbose_filename == NULL) {
-            PyThreadState *tstate = PyThreadState_GET();
-
-            if (tstate->frame != NULL) {
-                verbose_filename = tstate->frame->f_code->co_filename;
-                verbose_lineno = tstate->frame->f_code->co_firstlineno;
-            }
-        }
-    }
-    if (stats.instruction == parameter_instruction2) {
-        hit2++;
-    }
-
-    /* Update the maximum memory. */
-    tuning_memory = Py_MAX(tuning_memory, stats.memory);
-
-    /* Don't use special policy if the modulo is not defined. */
-    if (parameter_modulo1 != 0 || parameter_modulo2 != 0) {
-        /* Should we collect? */
-        int generation = -1;
-        if (hit1 == parameter_modulo1) {
-            hit1 = 0;
-            generation = Py_MAX(generation, (int) parameter_generation1);
-        }
-        if (hit2 == parameter_modulo2) {
-            hit2 = 0;
-            generation = Py_MAX(generation, (int) parameter_generation2);
-        }
-        return generation;
-    }
-
     /* If the count of generation 0 does not exceed the threshold, do nothing. */
     if (stats.count[0] <= _PyRuntime.gc.generations[0].threshold) {
         return -1;
@@ -954,10 +908,6 @@ learning_predict(struct gc_learning_stats stats) {
 /* Method for learning GC to be rewarded after collection. */
 static void
 learning_reward(struct gc_learning_stats before, struct gc_learning_stats after) {
-    /* Update the total number of objects scanned. */
-    for (int i = 0; i <= after.generation; i++) {
-        tuning_objects += before.size[i];
-    }
 }
 
 /* Update learning stats. */
@@ -1699,60 +1649,6 @@ gc_get_freeze_count_impl(PyObject *module)
     return gc_list_size(&_PyRuntime.gc.permanent_generation.head);
 }
 
-static PyObject *
-gc_get_size_impl(PyObject *module)
-{
-    return Py_BuildValue("(iii)",
-                         _PyRuntime.gc.generation_stats[0].size,
-                         _PyRuntime.gc.generation_stats[1].size,
-                         _PyRuntime.gc.generation_stats[2].size);
-}
-
-static Py_ssize_t
-gc_get_memory_impl(PyObject *module)
-{
-    return memory;
-}
-
-static int
-print_verbose_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data)
-{
-    uint64_t key, value;
-
-    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, key);
-    _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
-
-    if (value >= parameter_modulo1) {
-        fprintf(stderr, "%lu:%lu,", key, value);
-    }
-
-    return 0;
-}
-
-static void
-gc_print_tuning_stats_impl(PyObject *module)
-{
-    fprintf(stderr, "%lu\n%lu\n", tuning_memory, tuning_objects);
-
-    if (parameter_verbose) {
-        _Py_hashtable_foreach(hit_counts, print_verbose_entry, NULL);
-        fprintf(stderr, "\n");
-
-        if (verbose_filename != NULL) {
-            PyObject* repr = PyObject_Repr(verbose_filename);
-            PyObject* str = PyUnicode_AsEncodedString(repr, "utf-8", "~E~");
-            const char *bytes = PyBytes_AS_STRING(str);
-
-            fprintf(stderr, "filename: %s\n", bytes);
-            fprintf(stderr, "line_no: %d\n", verbose_lineno);
-
-            Py_XDECREF(repr);
-            Py_XDECREF(str);
-        }
-    }
-}
-
-
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
 "\n"
@@ -1773,9 +1669,7 @@ PyDoc_STRVAR(gc__doc__,
 "freeze() -- Freeze all tracked objects and ignore them for future collections.\n"
 "unfreeze() -- Unfreeze all objects in the permanent generation.\n"
 "get_freeze_count() -- Return the number of objects in the permanent generation.\n"
-"get_size() -- Return the current generation sizes.\n"
-"get_memory() -- Return the memory usage in bytes.\n"
-"print_tuning_stats() -- Prints the tuning statistics.\n");
+);
 
 static PyMethodDef GcMethods[] = {
     GC_ENABLE_METHODDEF
@@ -1797,9 +1691,6 @@ static PyMethodDef GcMethods[] = {
     GC_FREEZE_METHODDEF
     GC_UNFREEZE_METHODDEF
     GC_GET_FREEZE_COUNT_METHODDEF
-    GC_GET_SIZE_METHODDEF
-    GC_GET_MEMORY_METHODDEF
-    GC_PRINT_TUNING_STATS_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -1999,21 +1890,6 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
     if (_PyRuntime.gc.enabled && !_PyRuntime.gc.collecting && !PyErr_Occurred()) {
         update_learning_stats();
 
-        /* Update verbose hit count. */
-        if (parameter_verbose) {
-            uint64_t key = _PyRuntime.gc.learning_stats.instruction;
-            _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(hit_counts, key);
-            uint64_t count;
-            if (entry != NULL) {
-                _Py_HASHTABLE_ENTRY_READ_DATA(hit_counts, entry, count);
-                count++;
-                _Py_HASHTABLE_ENTRY_WRITE_DATA(hit_counts, entry, count);
-            } else {
-                count = 0;
-                _Py_HASHTABLE_SET(hit_counts, key, count);
-            }
-        }
-
         int generation = learning_predict(_PyRuntime.gc.learning_stats);
         if (generation != -1) {
             _PyRuntime.gc.collecting = 1;
@@ -2021,6 +1897,7 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
             _PyRuntime.gc.collecting = 0;
         }
     }
+
     op = FROM_GC(g);
     return op;
 }
