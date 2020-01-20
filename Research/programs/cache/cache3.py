@@ -24,7 +24,7 @@ def create_ll(size):
 
 
 def operation():
-    for i in range(100):
+    for i in range(1000):
         size = random.randint(2, 500)
         create_ll(size)
 
@@ -35,6 +35,7 @@ if __name__ == '__main__':
     while True:
         start = time.time()
         operation()
-        r = 1 / (1 + time.time() - start)
-        print(r)
+        x = time.time() - start
+        r = 1 / (1 + x)
+        print(x)
         gc.reward(r)
