@@ -380,4 +380,33 @@ gc_objects_scanned(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=8b1a79fb9221dbbe input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(gc_ann__doc__,
+"ann($module, value0, value1, /)\n"
+"--\n"
+"\n"
+"Evaluate the neural network and return a tuple representing the output.");
+
+#define GC_ANN_METHODDEF    \
+    {"ann", (PyCFunction)gc_ann, METH_FASTCALL, gc_ann__doc__},
+
+static PyObject *
+gc_ann_impl(PyObject *module, double value0, double value1);
+
+static PyObject *
+gc_ann(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
+{
+    PyObject *return_value = NULL;
+    double value0;
+    double value1;
+
+    if (!_PyArg_ParseStack(args, nargs, "dd:ann",
+        &value0, &value1)) {
+        goto exit;
+    }
+    return_value = gc_ann_impl(module, value0, value1);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=86946459235f0785 input=a9049054013a1b77]*/

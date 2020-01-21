@@ -24,18 +24,25 @@ def create_ll(size):
 
 
 def operation():
-    for i in range(1000):
+    for i in range(100):
         size = random.randint(2, 500)
         create_ll(size)
 
 
 if __name__ == '__main__':
-    random.seed(0)
+    for _ in range(200):
+        random.seed(0)
 
-    while True:
         start = time.time()
         operation()
-        x = time.time() - start
-        r = 1 / (1 + x)
-        print(x)
-        gc.reward(r)
+        delta = time.time() - start
+
+        print(delta)
+        # r = 1 / (1 + delta)
+        # gc.reward(r)
+
+    gc.collect()
+    gc.disable()
+
+    # print(gc.ann(0.1, 0.1))
+

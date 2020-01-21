@@ -1893,6 +1893,33 @@ gc_objects_scanned_impl(PyObject *module)
     return objects_scanned;
 }
 
+/*[clinic input]
+gc.ann
+
+    value0: double
+    value1: double
+    /
+
+Evaluate the neural network and return a tuple representing the output.
+[clinic start generated code]*/
+
+static PyObject *
+gc_ann_impl(PyObject *module, double value0, double value1)
+/*[clinic end generated code: output=92709ae3271034c1 input=1b968bcc45335ff4]*/
+{
+    // Set ANN inputs.
+    double inputs[DQN_INPUT_SIZE];
+    inputs[0] = value0;
+    inputs[1] = value1;
+
+    // Evaluate the ANN.
+    const double *output = genann_run(dqn_state.ann, inputs);
+    return Py_BuildValue("(dd)",
+                         output[0],
+                         output[1]);
+}
+
+
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
 "\n"
@@ -1915,6 +1942,7 @@ PyDoc_STRVAR(gc__doc__,
 "get_freeze_count() -- Return the number of objects in the permanent generation.\n"
 "reward() -- Set the reward for DQN GC.\n"
 "objects_scanned() -- The number of objects collected during GC.\n"
+"ann() -- Evaluate the neural network.\n"
 );
 
 static PyMethodDef GcMethods[] = {
@@ -1939,6 +1967,7 @@ static PyMethodDef GcMethods[] = {
     GC_GET_FREEZE_COUNT_METHODDEF
     GC_REWARD_METHODDEF
     GC_OBJECTS_SCANNED_METHODDEF
+    GC_ANN_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
