@@ -30,11 +30,22 @@ def operation():
 
 
 if __name__ == '__main__':
-    random.seed(0)
+    try:
+        while True:
+            random.seed(0)
 
-    while True:
-        start = time.time()
-        operation()
-        r = 1 / (1 + time.time() - start)
-        print(r * 1000)
-        gc.reward(r * 1000)
+            start_ob = gc.objects_scanned()
+            start = time.time()
+            operation()
+            delta = time.time() - start
+            delta_ob = gc.objects_scanned() - start_ob
+
+            if delta_ob == 0:
+                r = 0
+            else:
+                r = 1000 / (1 + delta)
+
+            print(r)
+            gc.reward(r)
+    except KeyboardInterrupt:
+        pass
