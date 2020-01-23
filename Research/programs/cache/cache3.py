@@ -30,18 +30,44 @@ def operation():
 
 
 if __name__ == '__main__':
-    for _ in range(200):
-        random.seed(0)
+    try:
+        while True:
+            random.seed(0)
 
-        start = time.time()
-        operation()
-        delta = time.time() - start
+            start = time.time()
+            operation()
+            delta = time.time() - start
 
-        print(delta)
-        # r = 1 / (1 + delta)
-        # gc.reward(r)
+            if gc.memory_usage() > 50000000:
+                r = 1 / (10 * (1 + delta))
+            else:
+                r = 1 / (1 + delta)
+
+            print(r)
+            gc.reward(r)
+    except KeyboardInterrupt:
+        pass
 
     gc.collect()
     gc.disable()
 
-    # print(gc.ann(0.1, 0.1))
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    xs = np.linspace(0, 1, num=50)
+    ys = np.linspace(0, 1, num=50)
+
+    for x in xs:
+        for y in ys:
+            no_collect, collect = gc.ann(x, y)
+
+            if no_collect > collect:
+                color = 'red'
+            else:
+                color = 'green'
+
+            plt.plot(x, y, marker='o', color=color, markersize=2)
+
+    plt.xlabel('Instruction')
+    plt.ylabel('Memory')
+    plt.savefig('cache3.png')

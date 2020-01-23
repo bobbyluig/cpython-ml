@@ -409,4 +409,32 @@ gc_ann(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=86946459235f0785 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(gc_memory_usage__doc__,
+"memory_usage($module, /)\n"
+"--\n"
+"\n"
+"Return the current memory usage in bytes.");
+
+#define GC_MEMORY_USAGE_METHODDEF    \
+    {"memory_usage", (PyCFunction)gc_memory_usage, METH_NOARGS, gc_memory_usage__doc__},
+
+static Py_ssize_t
+gc_memory_usage_impl(PyObject *module);
+
+static PyObject *
+gc_memory_usage(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t _return_value;
+
+    _return_value = gc_memory_usage_impl(module);
+    if ((_return_value == -1) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyLong_FromSsize_t(_return_value);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=9f0b1bb424f1966c input=a9049054013a1b77]*/
