@@ -1837,6 +1837,19 @@ gc_objects_scanned_impl(PyObject *module)
     return objects_scanned;
 }
 
+/*[clinic input]
+gc.memory_usage -> Py_ssize_t
+
+Return the memory usage.
+[clinic start generated code]*/
+
+static Py_ssize_t
+gc_memory_usage_impl(PyObject *module)
+/*[clinic end generated code: output=6bf0a65d36800cc7 input=6ca91d3bf9083216]*/
+{
+    return memory;
+}
+
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
 "\n"
@@ -1883,6 +1896,7 @@ static PyMethodDef GcMethods[] = {
     GC_GET_FREEZE_COUNT_METHODDEF
     GC_REWARD_METHODDEF
     GC_OBJECTS_SCANNED_METHODDEF
+    GC_MEMORY_USAGE_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 

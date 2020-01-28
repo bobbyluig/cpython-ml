@@ -34,17 +34,16 @@ if __name__ == '__main__':
         while True:
             random.seed(0)
 
-            start_ob = gc.objects_scanned()
             start = time.time()
             operation()
-            delta = time.time() - start
-            delta_ob = gc.objects_scanned() - start_ob
-
-            if delta_ob == 0:
-                r = 0
+            if gc.memory_usage() > 50000000:
+                gc.collect()
+                print('force collection')
+                delta = 10000
             else:
-                r = 1000 / (1 + delta)
+                delta = time.time() - start
 
+            r = 1000 / (1 + delta)
             print(r)
             gc.reward(r)
     except KeyboardInterrupt:
