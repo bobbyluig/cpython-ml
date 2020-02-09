@@ -326,6 +326,42 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(gc_dqn_enable__doc__,
+"dqn_enable($module, /)\n"
+"--\n"
+"\n"
+"Enable DQN garbage collector.");
+
+#define GC_DQN_ENABLE_METHODDEF    \
+    {"dqn_enable", (PyCFunction)gc_dqn_enable, METH_NOARGS, gc_dqn_enable__doc__},
+
+static PyObject *
+gc_dqn_enable_impl(PyObject *module);
+
+static PyObject *
+gc_dqn_enable(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    return gc_dqn_enable_impl(module);
+}
+
+PyDoc_STRVAR(gc_dqn_disable__doc__,
+"dqn_disable($module, /)\n"
+"--\n"
+"\n"
+"Disable DQN garbage collector.");
+
+#define GC_DQN_DISABLE_METHODDEF    \
+    {"dqn_disable", (PyCFunction)gc_dqn_disable, METH_NOARGS, gc_dqn_disable__doc__},
+
+static PyObject *
+gc_dqn_disable_impl(PyObject *module);
+
+static PyObject *
+gc_dqn_disable(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    return gc_dqn_disable_impl(module);
+}
+
 PyDoc_STRVAR(gc_reward__doc__,
 "reward($module, value, /)\n"
 "--\n"
@@ -381,35 +417,6 @@ exit:
     return return_value;
 }
 
-PyDoc_STRVAR(gc_ann__doc__,
-"ann($module, value0, value1, /)\n"
-"--\n"
-"\n"
-"Evaluate the neural network and return a tuple representing the output.");
-
-#define GC_ANN_METHODDEF    \
-    {"ann", (PyCFunction)gc_ann, METH_FASTCALL, gc_ann__doc__},
-
-static PyObject *
-gc_ann_impl(PyObject *module, double value0, double value1);
-
-static PyObject *
-gc_ann(PyObject *module, PyObject *const *args, Py_ssize_t nargs)
-{
-    PyObject *return_value = NULL;
-    double value0;
-    double value1;
-
-    if (!_PyArg_ParseStack(args, nargs, "dd:ann",
-        &value0, &value1)) {
-        goto exit;
-    }
-    return_value = gc_ann_impl(module, value0, value1);
-
-exit:
-    return return_value;
-}
-
 PyDoc_STRVAR(gc_memory_usage__doc__,
 "memory_usage($module, /)\n"
 "--\n"
@@ -437,4 +444,4 @@ gc_memory_usage(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=9f0b1bb424f1966c input=a9049054013a1b77]*/
+/*[clinic end generated code: output=9163623cf0ba1c18 input=a9049054013a1b77]*/

@@ -105,6 +105,10 @@ double genann_act_threshold(const struct genann *ann unused, double a) {
     return a > 0;
 }
 
+double genann_act_relu(const struct genann *ann unused, double a) {
+    return (a > 0.0) ? a : 0.0;
+}
+
 genann *genann_init(int inputs, int hidden_layers, int hidden, int outputs) {
     if (hidden_layers < 0) return 0;
     if (inputs < 1) return 0;
@@ -138,10 +142,10 @@ genann *genann_init(int inputs, int hidden_layers, int hidden, int outputs) {
 
     genann_randomize(ret);
 
-    ret->activation_hidden = genann_act_sigmoid_cached;
-    ret->activation_output = genann_act_sigmoid_cached;
+    ret->activation_hidden = genann_act_sigmoid;
+    ret->activation_output = genann_act_linear;
 
-    genann_init_sigmoid_lookup(ret);
+    // genann_init_sigmoid_lookup(ret);
 
     return ret;
 }
@@ -290,10 +294,9 @@ void genann_train(genann const *ann, double const *inputs, double const *desired
 
 
         /* Set output layer deltas. */
-        if (genann_act_output == genann_act_linear ||
-            ann->activation_output == genann_act_linear) {
+        if (ann->activation_output == genann_act_linear) {
             for (j = 0; j < ann->outputs; ++j) {
-                *d++ = *t++ - *o++;
+                *d++ = 2 * (*t++ - *o++);
             }
         } else {
             for (j = 0; j < ann->outputs; ++j) {
@@ -331,7 +334,12 @@ void genann_train(genann const *ann, double const *inputs, double const *desired
                 delta += forward_delta * forward_weight;
             }
 
-            *d = *o * (1.0 - *o) * delta;
+            if (ann->activation_hidden == genann_act_relu) {
+                *d = (*o > 0.0) ? delta : 0.0;
+            } else {
+                *d = *o * (1.0 - *o) * delta;
+            }
+
             ++d;
             ++o;
         }

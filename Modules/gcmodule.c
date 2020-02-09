@@ -25,6 +25,7 @@
 
 #include <Include/Python.h>
 #include <Modules/genann/genann.h>
+#include <stdbool.h>
 #include "Python.h"
 #include "internal/context.h"
 #include "internal/mem.h"
@@ -59,27 +60,31 @@ static size_t objects_scanned = 0;
 
 // DQN configuration.
 #define DQN_NUM_FEATURES 2
-#define DQN_INPUT_SIZE DQN_NUM_FEATURES
+#define DQN_HISTORY_LENGTH 1
+#define DQN_INPUT_SIZE (DQN_NUM_FEATURES * DQN_HISTORY_LENGTH)
 #define DQN_OUTPUT_SIZE 2
-#define DQN_HIDDEN_SIZE 2
+#define DQN_HIDDEN_SIZE (DQN_INPUT_SIZE * 4)
+#define DQN_HIDDEN_LAYERS 2
 
 // Struct for DQN observation.
 typedef struct DQNObservation {
-    // The instruction being executed.
-    uint64_t instruction;
-    // The total memory usage in bytes.
+    // Memory usage in bytes.
     uint64_t memory;
+    // Instruction location.
+    uint64_t instruction;
 } DQNObservation;
 
 // Struct for DQN transition to be stored in replay memory. Usually, we would use a sequence here. However, we simply
 // use 1 observation.
 typedef struct DQNTransition {
-    // The state at time t + 1 (after taking the action). The previous state can be found in the replay memory.
-    DQNObservation sequence;
+    // The state before taking the action.
+    DQNObservation observation;
     // The reward associated with the transition.
     double reward;
     // The action taken.
     uint8_t action;
+    // Whether or not the state is terminal.
+    uint8_t is_terminal;
 } DQNTransition;
 
 // Struct for DQN config.
@@ -110,6 +115,8 @@ static struct DQNState {
     uint64_t replay_capacity;
     // A circular index into the replay memory.
     uint64_t replay_index;
+    // The last index that was sampled from. At most the replay index.
+    uint64_t last_replay_index;
     // The number of evaluations.
     uint64_t evaluations;
     // The number of objects seen.
@@ -117,6 +124,10 @@ static struct DQNState {
     // The minimum and maximum program counters.
     uint64_t min_instruction;
     uint64_t max_instruction;
+    // Whether the learning GC is enabled.
+    bool enabled;
+    // Whether analysis pass is complete.
+    bool analysis;
 } dqn_state;
 
 /*** Begin DQN functions. ***/
@@ -133,30 +144,48 @@ static uint64_t dqn_rand_int(uint64_t start, uint64_t end) {
 
 // Converts statistics from GC to an observation.
 static DQNObservation dqn_to_observation(struct gc_learning_stats *stats) {
-    // Extract relevant information.
+    // Extract relevant information and normalize.
     DQNObservation observation;
     observation.memory = stats->memory;
     observation.instruction = stats->instruction;
     return observation;
 }
 
-// Pushes a frame into reply memory. The reward is set later.
-static void dqn_replay_push(DQNObservation *observation, uint8_t action) {
+// Initializes DQN inputs. Does not assume that index is in range.
+static void dqn_init_inputs(double* inputs, uint64_t index) {
+    // Assign sequence.
+    for (int i = 0; i < DQN_HISTORY_LENGTH; i++) {
+        DQNObservation observation = dqn_state.replay[index - DQN_HISTORY_LENGTH + 1 + i].observation;
+        inputs[i * DQN_NUM_FEATURES + 0] = (double) (observation.instruction - dqn_state.min_instruction)
+                                           / (dqn_state.max_instruction - dqn_state.min_instruction);
+        inputs[i * DQN_NUM_FEATURES + 1] = (double) observation.memory / (1ULL << 30U);
+    }
+}
+
+// Pushes a frame into reply memory.
+static void dqn_replay_push(DQNObservation *observation) {
     // Create transition.
     DQNTransition transition;
-    transition.sequence = *observation;
+    transition.observation = *observation;
     transition.reward = 0;
-    transition.action = action;
+    transition.action = 0;
+    transition.is_terminal = false;
 
     // Store into replay memory.
     uint64_t index = dqn_state.replay_index++ % dqn_state.replay_capacity;
     dqn_state.replay[index] = transition;
 }
 
-// The the previous replay associated with a given index.
+// The previous replay associated with a given index.
 static DQNTransition *dqn_previous_replay(uint64_t index) {
     uint64_t previous_index = (index - 1) % dqn_state.replay_capacity;
     return &(dqn_state.replay[previous_index]);
+}
+
+// The next replay associated with a given index.
+static DQNTransition *dqn_next_replay(uint64_t index) {
+    uint64_t next_index = (index + 1) % dqn_state.replay_capacity;
+    return &(dqn_state.replay[next_index]);
 }
 
 // Gets the last frame in the replay memory.
@@ -164,21 +193,20 @@ static DQNTransition *dqn_last_replay() {
     return dqn_previous_replay(dqn_state.replay_index);
 }
 
-// Samples a random replay index;
-static uint64_t dqn_sample_index() {
-    // Ignore first and last entries.
+// Samples a random replay index.
+static uint64_t dqn_sample_index(bool exclude_n) {
+    // If we are past the capacity, use the replay index as the index of the first value.
     return (dqn_state.replay_index > dqn_state.replay_capacity)
-            ? (dqn_state.replay_index + dqn_rand_int(1, dqn_state.replay_capacity - 1)) % dqn_state.replay_capacity
-            : dqn_rand_int(1, dqn_state.replay_index - 1);
+           ? (dqn_state.replay_index + dqn_rand_int(exclude_n - 1, dqn_state.replay_capacity - 1))
+             % dqn_state.replay_capacity
+           : dqn_rand_int(exclude_n - 1, dqn_state.replay_index - 1);
 }
 
 // Evaluates the policy function and returns the index of the best output.
-static uint8_t dqn_evaluate(DQNObservation *observation) {
+static uint8_t dqn_evaluate(uint64_t index) {
     // Set ANN input and normalize to [0, 1].
     double inputs[DQN_INPUT_SIZE];
-    inputs[0] = ((double) observation->instruction - dqn_state.min_instruction)
-            / (dqn_state.max_instruction - dqn_state.min_instruction);
-    inputs[1] = (double) observation->memory / (16ULL << 30U);
+    dqn_init_inputs(inputs, index);
 
     // Evaluate the ANN.
     const double *output = genann_run(dqn_state.ann, inputs);
@@ -193,8 +221,8 @@ static uint8_t dqn_evaluate(DQNObservation *observation) {
     return best_index;
 }
 
-// Selects an action based on the observation.
-static uint8_t dqn_select_action(DQNObservation *observation) {
+// Selects an action based. Assumes the last observation is in the replay history.
+static uint8_t dqn_select_action() {
     // Compute threshold.
     double eps_threshold = dqn_config.epsilon_end + (dqn_config.epsilon_start - dqn_config.epsilon_end)
             * exp(-1.0 * dqn_state.evaluations++ / dqn_config.epsilon_decay);
@@ -202,57 +230,65 @@ static uint8_t dqn_select_action(DQNObservation *observation) {
     // Determine if we should use the model or choose a random action.
     if (dqn_rand_float() > eps_threshold) {
         // Evaluate using model and find maximum.
-        return dqn_evaluate(observation);
+        return dqn_evaluate((dqn_state.replay_index - 1) % dqn_state.replay_capacity);
     } else {
-        // Choose a random action.
+        // Choose a random action from a distribution.
         return dqn_rand_int(0, DQN_OUTPUT_SIZE);
     }
+}
+
+// Train on index.
+static void dqn_train_index(uint64_t index) {
+    // Extract values.
+    uint8_t action = dqn_state.replay[index].action;
+    double reward = dqn_state.replay[index].reward;
+
+    // Compute desired quality.
+    double y;
+    if (dqn_state.replay[index].is_terminal) {
+        y = reward;
+    } else {
+        double inputs[DQN_INPUT_SIZE];
+        dqn_init_inputs(inputs, (index + 1) % dqn_state.replay_capacity);
+
+        const double *output = genann_run(dqn_state.ann, inputs);
+
+        uint8_t best_index = 0;
+        for (int i = 1; i < DQN_OUTPUT_SIZE; i++) {
+            if (output[i] > output[best_index]) {
+                best_index = i;
+            }
+        }
+
+        y = reward + dqn_config.gamma * output[best_index];
+    }
+
+    // Initialize inputs.
+    double inputs[DQN_INPUT_SIZE];
+    dqn_init_inputs(inputs, index);
+
+    // Evaluate the ANN on the old state.
+    const double *output = genann_run(dqn_state.ann, inputs);
+
+    // Set ANN desired output.
+    double desired_outputs[DQN_OUTPUT_SIZE];
+    memcpy(desired_outputs, output, sizeof(desired_outputs));
+    desired_outputs[action] = y;
+
+    // Train on desired output.
+    genann_train(dqn_state.ann, inputs, desired_outputs, dqn_config.learning_rate);
 }
 
 // Train on batch.
 static void dqn_train() {
     // Perform on mini-batch.
     for (uint64_t i = 0; i < dqn_config.batch_size; i++) {
-        // Sample a random index.
-        uint64_t index = dqn_sample_index();
+        // Sample a random index, ignoring the last index.
+        uint64_t index = dqn_sample_index(DQN_HISTORY_LENGTH);
 
-        // Extract values.
-        uint8_t action = dqn_previous_replay(index)->action;
-        double reward = dqn_previous_replay(index)->reward;
-        DQNObservation observation_after = dqn_state.replay[index].sequence;
-        DQNObservation observation_before = dqn_previous_replay(index)->sequence;
-
-        // Compute desired quality assuming that non-zero rewards are terminal.
-        double y = (reward != 0)
-                ? reward
-                : dqn_config.gamma * dqn_state.ann->output[dqn_evaluate(&observation_after)];
-
-        // Value must be in [0, 1].
-        if (y < 0) y = 0;
-        if (y > 1) y = 1;
-
-        // Set ANN input and normalize to [0, 1].
-        double inputs[DQN_INPUT_SIZE];
-        inputs[0] = ((double) observation_before.instruction - dqn_state.min_instruction) /
-                (dqn_state.max_instruction - dqn_state.min_instruction);
-        inputs[1] = (double) observation_before.memory / (16ULL << 30U);
-
-        // Evaluate the ANN on the old state.
-        const double *output = genann_run(dqn_state.ann, inputs);
-
-        // Set ANN desired output.
-        double desired_outputs[DQN_OUTPUT_SIZE];
-        memcpy(desired_outputs, output, sizeof(desired_outputs));
-        desired_outputs[action] = y;
-
-        // Train on desired output.
-        genann_train(dqn_state.ann, inputs, desired_outputs, dqn_config.learning_rate);
+        // Train on index.
+        dqn_train_index(index);
     }
-}
-
-// Sets the reward for the last observation.
-static void dqn_reward(double reward) {
-    dqn_last_replay()->reward = reward;
 }
 
 /*** End DQN functions. ***/
@@ -306,27 +342,30 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     const char *dqn_skip = Py_GETENV("DQN_SKIP");
     const char *dqn_batch_size = Py_GETENV("DQN_BATCH_SIZE");
     dqn_config.replay_size = (dqn_replay_size != NULL) ? (uint64_t) atoll(dqn_replay_size) : (16ULL << 20U);
-    dqn_config.learning_rate = (dqn_learning_rate != NULL) ? atof(dqn_learning_rate) : 0.01;
+    dqn_config.learning_rate = (dqn_learning_rate != NULL) ? atof(dqn_learning_rate) : 0.1;
     dqn_config.epsilon_start = (dqn_epsilon_start != NULL) ? atof(dqn_epsilon_start) : 1.0;
-    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.0;
+    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.0001;
     dqn_config.epsilon_decay = (dqn_epsilon_decay != NULL) ? atof(dqn_epsilon_decay) : 10000.0;
     dqn_config.gamma = (dqn_gamma != NULL) ? atof(dqn_gamma) : 0.999;
-    dqn_config.skip = (dqn_skip != NULL) ? (uint64_t) atoll(dqn_skip) : 10ULL;
-    dqn_config.batch_size = (dqn_batch_size != NULL) ? (uint64_t) atoll(dqn_batch_size) : 1ULL;
+    dqn_config.skip = (dqn_skip != NULL) ? (uint64_t) atoll(dqn_skip) : 16ULL;
+    dqn_config.batch_size = (dqn_batch_size != NULL) ? (uint64_t) atoll(dqn_batch_size) : 32ULL;
 
     // Seed RNG.
     srand(time(NULL));
 
     // Initialize DQN state.
-    dqn_state.ann = genann_init(DQN_INPUT_SIZE, 1, DQN_HIDDEN_SIZE, DQN_OUTPUT_SIZE);
+    dqn_state.ann = genann_init(DQN_INPUT_SIZE, DQN_HIDDEN_LAYERS, DQN_HIDDEN_SIZE, DQN_OUTPUT_SIZE);
     genann_randomize(dqn_state.ann);
     dqn_state.replay_capacity = dqn_config.replay_size / sizeof(DQNTransition);
     dqn_state.replay_index = 0;
+    dqn_state.last_replay_index = 0;
     dqn_state.replay = PyMem_Malloc(dqn_state.replay_capacity * sizeof(DQNTransition));
     dqn_state.evaluations = 0;
     dqn_state.objects = 0;
-    dqn_state.min_instruction = 0;
+    dqn_state.min_instruction = UINT64_MAX;
     dqn_state.max_instruction = 0;
+    dqn_state.enabled = false;
+    dqn_state.analysis = false;
 
     // Initialize learning stats.
     struct gc_learning_stats learning_stats = {};
@@ -1071,7 +1110,7 @@ clear_freelists(void)
 static int _Py_HOT_FUNCTION
 learning_predict(struct gc_learning_stats *stats) {
     // Determine whether we should use DQN. Otherwise, use the default GC.
-    if (dqn_state.replay_index > 0) {
+    if (dqn_state.enabled && dqn_state.analysis) {
         // Determine whether it is time to use the policy function.
         if (dqn_state.objects++ % dqn_config.skip != 0) {
             return -1;
@@ -1079,8 +1118,9 @@ learning_predict(struct gc_learning_stats *stats) {
 
         // Get the action and store to replay.
         DQNObservation observation = dqn_to_observation(stats);
-        uint8_t action = dqn_select_action(&observation);
-        dqn_replay_push(&observation, action);
+        dqn_replay_push(&observation);
+        uint8_t action = dqn_select_action();
+        dqn_last_replay()->action = action;
 
         // Convert to GC action.
         if (action == 0) {
@@ -1854,6 +1894,34 @@ gc_get_freeze_count_impl(PyObject *module)
 }
 
 /*[clinic input]
+gc.dqn_enable
+
+Enable DQN garbage collector.
+[clinic start generated code]*/
+
+static PyObject *
+gc_dqn_enable_impl(PyObject *module)
+/*[clinic end generated code: output=82f7b75fed43d981 input=f7a948c34e10b8e2]*/
+{
+    dqn_state.enabled = true;
+    Py_RETURN_NONE;
+}
+
+/*[clinic input]
+gc.dqn_disable
+
+Disable DQN garbage collector.
+[clinic start generated code]*/
+
+static PyObject *
+gc_dqn_disable_impl(PyObject *module)
+/*[clinic end generated code: output=ff4454c5d3ffbb2f input=4c5aa6253d94c4ea]*/
+{
+    dqn_state.enabled = false;
+    Py_RETURN_NONE;
+}
+
+/*[clinic input]
 gc.reward
 
     value: double
@@ -1866,34 +1934,44 @@ static PyObject *
 gc_reward_impl(PyObject *module, double value)
 /*[clinic end generated code: output=efd2b9b189133062 input=d7564bfac59014cd]*/
 {
-    // If first call, start trace.
-    if (dqn_state.replay_index == 0 && dqn_state.min_instruction == 0 && dqn_state.max_instruction == 0) {
-        dqn_state.min_instruction = _PyRuntime.gc.learning_stats.instruction;
-        dqn_state.max_instruction = _PyRuntime.gc.learning_stats.instruction;
+    // Not yet enabled. Enable and return.
+    if (!dqn_state.enabled) {
+        dqn_state.enabled = true;
         Py_RETURN_NONE;
     }
 
-    // Train if not first call after trace has finished.
-    if (dqn_state.replay_index != 0) {
-        // Apply reward to all previous observations.
-        for (uint64_t i = 1; i < Py_MIN(dqn_state.replay_index, dqn_state.replay_capacity); i++) {
-            if (dqn_state.replay[i].reward != -1) {
-                dqn_state.replay[i].reward = value;
-            } else {
-                dqn_state.replay[i].reward = 0;
-            }
-        }
-
-        // Do some training.
-        dqn_train();
-
-        // Reset.
-        dqn_state.replay_index = 0;
+    // Analysis pass done.
+    if (!dqn_state.analysis) {
+        dqn_state.analysis = true;
+        Py_RETURN_NONE;
     }
 
-    // Add the current observation.
-    DQNObservation observation = dqn_to_observation(&_PyRuntime.gc.learning_stats);
-    dqn_replay_push(&observation, 0);
+    // No new observations collected. Do nothing.
+    if (dqn_state.last_replay_index == dqn_state.replay_index) {
+        Py_RETURN_NONE;
+    }
+
+    // Apply reward to all observations.
+//    if (dqn_state.replay_index - dqn_state.last_replay_index > dqn_state.replay_capacity) {
+//        for (uint64_t i = 0; i < dqn_state.replay_capacity; i++) {
+//            dqn_state.replay[i].reward = value;
+//        }
+//    } else {
+//        for (uint64_t i = dqn_state.last_replay_index; i < dqn_state.replay_index; i++) {
+//           dqn_state.replay[i % dqn_state.replay_capacity].reward = value;
+//        }
+//    }
+
+     // dqn_last_replay()->reward = value;
+    // dqn_train();
+
+    // Do some training.
+    for (uint64_t i = dqn_state.last_replay_index; i < dqn_state.replay_index; i++) {
+        dqn_train();
+    }
+
+    // Set last replay index.
+    dqn_state.last_replay_index = dqn_state.replay_index;
 
     // Return none.
     Py_RETURN_NONE;
@@ -1912,30 +1990,63 @@ gc_objects_scanned_impl(PyObject *module)
     return objects_scanned;
 }
 
-/*[clinic input]
-gc.ann
-
-    value0: double
-    value1: double
-    /
-
-Evaluate the neural network and return a tuple representing the output.
-[clinic start generated code]*/
+PyDoc_STRVAR(gc_ann_evaluate__doc__,
+             "ann_evaluate(inputs) -> outputs\n");
 
 static PyObject *
-gc_ann_impl(PyObject *module, double value0, double value1)
-/*[clinic end generated code: output=92709ae3271034c1 input=1b968bcc45335ff4]*/
+gc_ann_evaluate(PyObject *self, PyObject *args)
 {
+    // Parse arguments.
+    PyObject *arg_inputs;
+    if (!PyArg_ParseTuple(args, "O", &arg_inputs)) {
+        return NULL;
+    }
+
     // Set ANN inputs.
     double inputs[DQN_INPUT_SIZE];
-    inputs[0] = value0;
-    inputs[1] = value1;
+    for (int i = 0; i < DQN_INPUT_SIZE; i++) {
+        inputs[i] = PyFloat_AsDouble(PyTuple_GetItem(arg_inputs, i));
+    }
 
     // Evaluate the ANN.
     const double *output = genann_run(dqn_state.ann, inputs);
-    return Py_BuildValue("(dd)",
-                         output[0],
-                         output[1]);
+    PyObject *output_tuple = PyTuple_New(DQN_OUTPUT_SIZE);
+    for (int i = 0; i < DQN_OUTPUT_SIZE; i++) {
+        PyTuple_SetItem(output_tuple, i, PyFloat_FromDouble(output[i]));
+    }
+
+    // Return output.
+    return output_tuple;
+}
+
+PyDoc_STRVAR(gc_ann_train__doc__,
+             "ann_train(inputs, desired_outputs) -> None\n");
+
+static PyObject *
+gc_ann_train(PyObject *self, PyObject *args)
+{
+    // Parse arguments.
+    PyObject *arg_inputs, *arg_desired_outputs;
+    if (!PyArg_ParseTuple(args, "OO", &arg_inputs, &arg_desired_outputs)) {
+        return NULL;
+    }
+
+    // Set ANN inputs.
+    double inputs[DQN_INPUT_SIZE];
+    for (int i = 0; i < DQN_INPUT_SIZE; i++) {
+        inputs[i] = PyFloat_AsDouble(PyTuple_GetItem(arg_inputs, i));
+    }
+
+    // Set ANN desired outputs.
+    double desired_outputs[DQN_OUTPUT_SIZE];
+    for (int i = 0; i < DQN_INPUT_SIZE; i++) {
+        desired_outputs[i] = PyFloat_AsDouble(PyTuple_GetItem(arg_desired_outputs, i));
+    }
+
+    // Do training.
+    genann_train(dqn_state.ann, inputs, desired_outputs, dqn_config.learning_rate);
+
+    Py_RETURN_NONE;
 }
 
 /*[clinic input]
@@ -1974,7 +2085,6 @@ PyDoc_STRVAR(gc__doc__,
 "get_freeze_count() -- Return the number of objects in the permanent generation.\n"
 "reward() -- Set the reward for DQN GC.\n"
 "objects_scanned() -- The number of objects collected during GC.\n"
-"ann() -- Evaluate the neural network.\n"
 "memory_usage() -- The memory usage in bytes.\n"
 );
 
@@ -2000,8 +2110,11 @@ static PyMethodDef GcMethods[] = {
     GC_GET_FREEZE_COUNT_METHODDEF
     GC_REWARD_METHODDEF
     GC_OBJECTS_SCANNED_METHODDEF
-    GC_ANN_METHODDEF
     GC_MEMORY_USAGE_METHODDEF
+    GC_DQN_ENABLE_METHODDEF
+    GC_DQN_DISABLE_METHODDEF
+    {"ann_train",  gc_ann_train, METH_VARARGS, gc_ann_train__doc__},
+    {"ann_evaluate",  gc_ann_evaluate, METH_VARARGS, gc_ann_evaluate__doc__},
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -2205,7 +2318,7 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
     if (_PyRuntime.gc.enabled && !_PyRuntime.gc.collecting && !PyErr_Occurred()) {
         update_learning_stats();
 
-        if (dqn_state.replay_index == 0 && dqn_state.max_instruction != 0) {
+        if (dqn_state.enabled && !dqn_state.analysis) {
             if (_PyRuntime.gc.learning_stats.instruction != 0) {
                 dqn_state.min_instruction = Py_MIN(_PyRuntime.gc.learning_stats.instruction, dqn_state.min_instruction);
                 dqn_state.max_instruction = Py_MAX(_PyRuntime.gc.learning_stats.instruction, dqn_state.max_instruction);
@@ -2215,10 +2328,12 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
         int generation = learning_predict(&_PyRuntime.gc.learning_stats);
         if (generation != -1) {
             _PyRuntime.gc.collecting = 1;
-
             int n = collect_with_callback(generation);
-            if (n == 0 && dqn_state.replay_index > 0) {
-                dqn_reward(-1);
+
+            if (n == 0) {
+                dqn_last_replay()->reward = -1;
+            } else {
+                dqn_last_replay()->reward = 1;
             }
 
             _PyRuntime.gc.collecting = 0;

@@ -34,17 +34,14 @@ if __name__ == '__main__':
         while True:
             random.seed(0)
 
+            start_collections = gc.get_stats()[2]['collections']
             start = time.time()
             operation()
             delta = time.time() - start
+            delta_collections = gc.get_stats()[2]['collections'] - start_collections
 
-            if gc.memory_usage() > 50000000:
-                r = 1 / (10 * (1 + delta))
-            else:
-                r = 1 / (1 + delta)
-
-            print(r)
-            gc.reward(r)
+            print(delta, delta_collections)
+            gc.reward(0)
     except KeyboardInterrupt:
         pass
 
@@ -59,7 +56,7 @@ if __name__ == '__main__':
 
     for x in xs:
         for y in ys:
-            no_collect, collect = gc.ann(x, y)
+            no_collect, collect = gc.ann_evaluate((x, y))
 
             if no_collect > collect:
                 color = 'red'
