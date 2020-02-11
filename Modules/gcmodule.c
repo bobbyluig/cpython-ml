@@ -281,7 +281,11 @@ static uint8_t dqn_select_action() {
         return dqn_evaluate((dqn_state.replay_index - 1) % dqn_state.replay_capacity);
     } else {
         // Choose a random action from a distribution.
-        return dqn_rand_int(0, DQN_NUM_ACTIONS);
+        if (dqn_rand_float() < 1.0 / 700.0) {
+            return dqn_rand_int(1, DQN_NUM_ACTIONS);
+        } else {
+            return 0;
+        }
     }
 }
 
@@ -414,7 +418,7 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     dqn_config.replay_size = (dqn_replay_size != NULL) ? (uint64_t) atoll(dqn_replay_size) : (16ULL << 20U);
     dqn_config.learning_rate = (dqn_learning_rate != NULL) ? atof(dqn_learning_rate) : 0.1;
     dqn_config.epsilon_start = (dqn_epsilon_start != NULL) ? atof(dqn_epsilon_start) : 1.0;
-    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.00001;
+    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.001;
     dqn_config.epsilon_decay = (dqn_epsilon_decay != NULL) ? atof(dqn_epsilon_decay) : 10000.0;
     dqn_config.gamma = (dqn_gamma != NULL) ? atof(dqn_gamma) : 0.999;
     dqn_config.skip = (dqn_skip != NULL) ? (uint64_t) atoll(dqn_skip) : 16ULL;
@@ -2341,6 +2345,9 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
             int n = collect_with_callback(generation);
             if (n == 0) {
                 dqn_last_replay()->reward -= 100;
+                if (dqn_state.replay_index >= 2) {
+                    dqn_train_index((dqn_state.replay_index - 2) % dqn_state.replay_capacity);
+                }
             }
             _PyRuntime.gc.collecting = 0;
         }
