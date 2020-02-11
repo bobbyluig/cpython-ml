@@ -15,6 +15,11 @@ class LLNode:
 def create_ll(size):
     node = LLNode(None, None, 0)
 
+    # Don't collect here!
+    a = []
+    for _ in range(700):
+        a.append([])
+
     for i in range(1, size - 1):
         new_node = LLNode(node, None, i)
         node.next = new_node
@@ -24,47 +29,44 @@ def create_ll(size):
 
 
 def operation():
-    for i in range(100):
+    for i in range(500):
         size = random.randint(2, 500)
         create_ll(size)
 
 
 if __name__ == '__main__':
-    try:
-        while True:
-            random.seed(0)
+    # Warm up
+    random.seed(0)
+    operation()
 
-            start_collections = gc.get_stats()[2]['collections']
-            start = time.time()
-            operation()
-            delta = time.time() - start
-            delta_collections = gc.get_stats()[2]['collections'] - start_collections
+    # Compute target.
+    times = []
+    for _ in range(20):
+        random.seed(0)
+        start = time.time()
+        operation()
+        times.append(time.time() - start)
+    print('Target', sum(times) / 20)
 
-            print(delta, delta_collections)
-            gc.reward(0)
-    except KeyboardInterrupt:
-        pass
+    # Moving average.
+    alpha = 0.1
+    average = None
 
-    gc.collect()
-    gc.disable()
+    while True:
+        random.seed(0)
 
-    import matplotlib.pyplot as plt
-    import numpy as np
+        start = time.time()
+        operation()
+        delta = time.time() - start
 
-    xs = np.linspace(0, 1, num=50)
-    ys = np.linspace(0, 1, num=50)
+        if gc.memory_usage() > 64000000:
+            delta += 100000
 
-    for x in xs:
-        for y in ys:
-            no_collect, collect = gc.ann_evaluate((x, y))
+        if average is None:
+            average = delta
+        else:
+            average = alpha * delta + (1 - alpha) * average
 
-            if no_collect > collect:
-                color = 'red'
-            else:
-                color = 'green'
+        print('Current', average, end='\r')
+        gc.reward(-delta)
 
-            plt.plot(x, y, marker='o', color=color, markersize=2)
-
-    plt.xlabel('Instruction')
-    plt.ylabel('Memory')
-    plt.savefig('cache3.png')
