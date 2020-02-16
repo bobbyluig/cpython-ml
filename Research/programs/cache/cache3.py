@@ -61,8 +61,8 @@ if __name__ == '__main__':
         delta = time.time() - start
         delta_collections = gc.get_stats()[2]['collections'] - start_collections
 
-        if gc.memory_usage() > 64000000:
-            delta += 100000
+        if gc.memory_usage() > 32000000:
+            delta += 1000
 
         if average is None:
             average = delta

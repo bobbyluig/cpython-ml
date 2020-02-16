@@ -60,7 +60,7 @@ static size_t objects_scanned = 0;
 // DQN configuration.
 #define DQN_D1 128 // memory
 #define DQN_NUM_STATES (DQN_D1)
-#define DQN_NUM_ACTIONS 2
+#define DQN_NUM_ACTIONS 4
 
 // Struct for DQN observation.
 typedef struct DQNObservation {
@@ -120,6 +120,8 @@ static struct DQNState {
     // The minimum and maximum program counters.
     uint64_t min_instruction;
     uint64_t max_instruction;
+    // The number of random actions taken.
+    uint64_t random_actions;
     // Whether the learning GC is enabled.
     bool enabled;
     // Whether analysis pass is complete.
@@ -280,6 +282,9 @@ static uint8_t dqn_select_action() {
         // Evaluate using model and find maximum.
         return dqn_evaluate((dqn_state.replay_index - 1) % dqn_state.replay_capacity);
     } else {
+        // Indicate that a random action was chose.
+        dqn_state.random_actions++;
+
         // Choose a random action from a distribution.
         if (dqn_rand_float() < 1.0 / 700.0) {
             return dqn_rand_int(1, DQN_NUM_ACTIONS);
@@ -438,6 +443,7 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     dqn_state.objects = 0;
     dqn_state.min_instruction = UINT64_MAX;
     dqn_state.max_instruction = 0;
+    dqn_state.random_actions = 0;
     dqn_state.enabled = false;
     dqn_state.analysis = false;
 
@@ -1197,11 +1203,7 @@ learning_predict(struct gc_learning_stats *stats) {
         dqn_last_replay()->action = action;
 
         // Convert to GC action.
-        if (action == 0) {
-            return -1;
-        } else {
-            return 2;
-        }
+        return ((int) action) - 1;
     }
 
     /* If the count of generation 0 does not exceed the threshold, do nothing. */
@@ -2072,6 +2074,19 @@ gc_memory_usage_impl(PyObject *module)
 /*[clinic end generated code: output=6bf0a65d36800cc7 input=2d10d1974931c7e8]*/
 {
     return memory_usage;
+}
+
+/*[clinic input]
+gc.random_actions -> Py_ssize_t
+
+Return the number of random actions taken.
+[clinic start generated code]*/
+
+static Py_ssize_t
+gc_random_actions_impl(PyObject *module)
+/*[clinic end generated code: output=133936503d7dbfa1 input=4554699585433668]*/
+{
+    return dqn_state.random_actions;
 }
 
 

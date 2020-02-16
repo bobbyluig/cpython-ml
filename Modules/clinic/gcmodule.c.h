@@ -444,4 +444,32 @@ gc_memory_usage(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=9163623cf0ba1c18 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(gc_random_actions__doc__,
+"random_actions($module, /)\n"
+"--\n"
+"\n"
+"Return the number of random actions taken.");
+
+#define GC_RANDOM_ACTIONS_METHODDEF    \
+    {"random_actions", (PyCFunction)gc_random_actions, METH_NOARGS, gc_random_actions__doc__},
+
+static Py_ssize_t
+gc_random_actions_impl(PyObject *module);
+
+static PyObject *
+gc_random_actions(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t _return_value;
+
+    _return_value = gc_random_actions_impl(module);
+    if ((_return_value == -1) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyLong_FromSsize_t(_return_value);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=df22f29ca74f9405 input=a9049054013a1b77]*/
