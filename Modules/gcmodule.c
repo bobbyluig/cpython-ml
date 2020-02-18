@@ -2140,6 +2140,7 @@ static PyMethodDef GcMethods[] = {
     GC_MEMORY_USAGE_METHODDEF
     GC_DQN_ENABLE_METHODDEF
     GC_DQN_DISABLE_METHODDEF
+    GC_RANDOM_ACTIONS_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -2284,8 +2285,15 @@ _PyGC_Fini(void)
 {
     Py_CLEAR(_PyRuntime.gc.callbacks);
 
-    // Print metadata and cleanup hashtable.
+    // Print metadata.
     _Py_hashtable_foreach(dqn_state.q_table, dqn_print_hashtable_entry, NULL);
+
+    // Print aggregate table statistics.
+    if (dqn_state.q_table->entries > 0) {
+        printf("Total entries: %lu\n", dqn_state.q_table->entries);
+    }
+
+    // Cleanup table.
     _Py_hashtable_foreach(dqn_state.q_table, dqn_free_hashtable_entry, NULL);
 
     // Cleanup DQN state.
