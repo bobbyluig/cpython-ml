@@ -424,7 +424,7 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     dqn_config.replay_size = (dqn_replay_size != NULL) ? (uint64_t) atoll(dqn_replay_size) : (16ULL << 20U);
     dqn_config.learning_rate = (dqn_learning_rate != NULL) ? atof(dqn_learning_rate) : 0.1;
     dqn_config.epsilon_start = (dqn_epsilon_start != NULL) ? atof(dqn_epsilon_start) : 1.0;
-    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.001;
+    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.01;
     dqn_config.epsilon_decay = (dqn_epsilon_decay != NULL) ? atof(dqn_epsilon_decay) : 100000.0;
     dqn_config.gamma = (dqn_gamma != NULL) ? atof(dqn_gamma) : 0.999;
     dqn_config.skip = (dqn_skip != NULL) ? (uint64_t) atoll(dqn_skip) : 16ULL;
