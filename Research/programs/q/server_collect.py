@@ -1,7 +1,7 @@
 import gc
 import logging
 import time
-import os
+import sys
 import threading
 
 from flask import Flask, g
@@ -14,8 +14,14 @@ _data = [[] for _ in range(1000000)]
 # Counter for number of requests.
 count = 0
 
+# Counter for GC.
+gc_count = 0
+
 # Global lock.
 lock = threading.Lock()
+
+# Zero time.
+zero_time = None
 
 
 @app.after_request
@@ -29,11 +35,7 @@ def after_request(response):
 
 
 def reward():
-    global count
-
-    # Running average.
-    average = 0
-    alpha = 0.01
+    global count, zero_time
 
     # The last number of request served.
     last_count = count
@@ -52,23 +54,33 @@ def reward():
             r = (count - last_count)
             last_count = count
 
+        # Get current time.
+        current_time = time.time()
+
+        # Get memory usage.
+        memory = gc.memory_usage()
+
         # Ran out of memory.
-        if gc.memory_usage() > 130000000:
-            r = -50
+        if memory > 130000000:
+            gc.collect()
+            r = -200
         else:
-            r /= (time.time() - start)
-
-        # Compute running average of reward.
-        if average is None:
-            average = r
-        else:
-            average = alpha * r + (1 - alpha) * average
-
-        # Print out statistics.
-        print('Average Reward: {:<10.6f} {}'.format(average, gc.memory_usage()), end='\r')
+            r /= (current_time - start)
 
         # Provide reward.
         gc.reward(r)
+
+        # Set zero time.
+        if zero_time is None:
+            zero_time = current_time
+
+        # Time since start.
+        time_since_start = current_time - zero_time
+        if time_since_start > 60 * 5:
+            raise Exception
+
+        # Print out statistics.
+        print('{},{},{}'.format(time_since_start, r, memory))
 
         # Start time.
         start = time.time()
@@ -96,4 +108,4 @@ if __name__ == '__main__':
     try:
         app.run()
     except KeyboardInterrupt:
-        os.exit(0)
+        raise Exception

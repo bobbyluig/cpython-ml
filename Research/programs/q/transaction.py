@@ -1,7 +1,8 @@
 import random
 import time
+import gc
 
-from benchmark import benchmark
+from benchmark import collect
 
 
 class Transaction:
@@ -52,4 +53,13 @@ def operation():
 # GC Information
 # Instructions: 26
 if __name__ == '__main__':
-    benchmark(operation, lambda time: -time)
+    # Reward function.
+    def reward(t, m):
+        if m > 24000000:
+            gc.collect()
+            return -100
+        else:
+            return 10 - t
+
+    collect(operation, reward)
+

@@ -1,8 +1,8 @@
 import functools
 import gc
 import random
-import time
-from benchmark import benchmark
+
+from benchmark import collect
 
 
 class LLNode:
@@ -43,12 +43,13 @@ if __name__ == '__main__':
     operation()
 
     # Reward function.
-    def reward(t):
-        if gc.memory_usage() > 32000000:
-            t += 1000
-
-        return -t
+    def reward(t, m):
+        if m > 25 << 20:
+            gc.collect()
+            return -50
+        else:
+            return 10 - t
 
     # Benchmark.
-    benchmark(operation, reward)
+    collect(operation, reward)
 

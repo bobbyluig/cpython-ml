@@ -417,6 +417,34 @@ exit:
     return return_value;
 }
 
+PyDoc_STRVAR(gc_gc_time__doc__,
+"gc_time($module, /)\n"
+"--\n"
+"\n"
+"Return the total time spent in GC.");
+
+#define GC_GC_TIME_METHODDEF    \
+    {"gc_time", (PyCFunction)gc_gc_time, METH_NOARGS, gc_gc_time__doc__},
+
+static double
+gc_gc_time_impl(PyObject *module);
+
+static PyObject *
+gc_gc_time(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *return_value = NULL;
+    double _return_value;
+
+    _return_value = gc_gc_time_impl(module);
+    if ((_return_value == -1.0) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyFloat_FromDouble(_return_value);
+
+exit:
+    return return_value;
+}
+
 PyDoc_STRVAR(gc_memory_usage__doc__,
 "memory_usage($module, /)\n"
 "--\n"
@@ -472,4 +500,4 @@ gc_random_actions(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=df22f29ca74f9405 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=6037980f43545b15 input=a9049054013a1b77]*/
