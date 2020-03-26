@@ -67,9 +67,11 @@ def collect(operation, reward):
 
     # Main measurement loop.
     while True:
+        # Get the starting random actions.
+        random_start = gc.random_actions()
+
         # Get the starting time.
         start = time.time()
-        random_start = gc.random_actions()
 
         # Perform operation with GC.
         gc.enable()
@@ -93,8 +95,11 @@ def collect(operation, reward):
 
         # Time since start.
         time_since_start = current_time - zero_time
-        if time_since_start > 60 * 10:
+        if time_since_start > 60 * 5:
             break
 
+        # Change in number of actions.
+        actions = gc.random_actions() - random_start
+
         # Print out statistics.
-        print('{},{},{},{}'.format(time_since_start, r, memory, gc.random_actions() - random_start))
+        print('{},{},{},{}'.format(time_since_start, r, memory, actions))

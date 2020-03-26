@@ -56,9 +56,9 @@ def operation():
 if __name__ == '__main__':
     # Reward function.
     def reward(t, m):
-        if m > 26 << 20:
+        if m > 25 << 20:
             gc.collect()
-            return -10
+            return -1
         else:
             return 10 - t
 

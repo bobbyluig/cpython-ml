@@ -1,7 +1,7 @@
 import gc
 import logging
 import time
-import sys
+import os
 import threading
 
 from flask import Flask, g
@@ -43,6 +43,9 @@ def reward():
     # The starting time.
     start = time.time()
 
+    # Get the starting random actions.
+    random_start = gc.random_actions()
+
     while True:
         # Wait a bit.
         time.sleep(1)
@@ -61,9 +64,9 @@ def reward():
         memory = gc.memory_usage()
 
         # Ran out of memory.
-        if memory > 130000000:
+        if memory > (500 << 20):
             gc.collect()
-            r = -200
+            r = -100
         else:
             r /= (current_time - start)
 
@@ -77,13 +80,19 @@ def reward():
         # Time since start.
         time_since_start = current_time - zero_time
         if time_since_start > 60 * 5:
-            raise Exception
+            os._exit(0)
+
+        # Change in number of actions.
+        actions = gc.random_actions() - random_start
 
         # Print out statistics.
-        print('{},{},{}'.format(time_since_start, r, memory))
+        print('{},{},{},{}'.format(time_since_start, r, memory, actions))
 
         # Start time.
         start = time.time()
+
+        # Start actions.
+        random_start = gc.random_actions()
 
 
 @app.route('/')

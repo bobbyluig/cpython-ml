@@ -97,6 +97,9 @@ static struct QConfig {
     uint64_t skip;
     // The maximum memory in bytes for Q-table.
     uint64_t max_memory;
+    // The fence memory and penalty.
+    uint64_t fence_memory;
+    double fence_penalty;
     // The memory step size.
     uint16_t memory_step;
 } q_config;
@@ -208,6 +211,13 @@ static double *q_get_table(uint64_t index) {
         // All values are initially zero.
         table = PyMem_Calloc(Q_NUM_ACTIONS, sizeof(double));
         _Py_HASHTABLE_SET(q_state.q_table, key, table);
+
+        // If over memory fence, penalize every state except full collection.
+        if (observation.memory > q_config.fence_memory) {
+            for (int i = 0; i < Q_NUM_ACTIONS - 1; i++) {
+                table[i] -= q_config.fence_penalty;
+            }
+        }
     } else {
         _Py_HASHTABLE_ENTRY_READ_DATA(q_state.q_table, entry, table);
     }
@@ -415,6 +425,8 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     const char *q_gamma = Py_GETENV("Q_GAMMA");
     const char *q_skip = Py_GETENV("Q_SKIP");
     const char *q_max_memory = Py_GETENV("Q_MAX_MEMORY");
+    const char *q_fence_memory = Py_GETENV("Q_FENCE_MEMORY");
+    const char *q_fence_penalty = Py_GETENV("Q_FENCE_PENALTY");
     const char *q_memory_step = Py_GETENV("Q_MEMORY_STEP");
     q_config.replay_size = (q_replay_size != NULL) ? (uint64_t) atoll(q_replay_size) : (16ULL << 20U);
     q_config.learning_rate = (q_learning_rate != NULL) ? atof(q_learning_rate) : 0.1;
@@ -424,6 +436,8 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     q_config.gamma = (q_gamma != NULL) ? atof(q_gamma) : 0.9999;
     q_config.skip = (q_skip != NULL) ? (uint64_t) atoll(q_skip) : 10ULL;
     q_config.max_memory = (q_max_memory != NULL) ? (uint64_t) atoll(q_max_memory) : (256ULL << 20U);
+    q_config.fence_memory = (q_fence_memory != NULL) ? (uint64_t) atoll(q_fence_memory) : q_config.max_memory;
+    q_config.fence_penalty = (q_fence_penalty != NULL) ? atof(q_fence_penalty) : 1.0;
     q_config.memory_step = (q_memory_step != NULL) ? (uint16_t) atoi(q_memory_step) : 20U;
 
     // Seed RNG.
@@ -2017,6 +2031,8 @@ gc_reward_impl(PyObject *module, double value)
         printf("Q_GAMMA: %f\n", q_config.gamma);
         printf("Q_SKIP: %lu\n", q_config.skip);
         printf("Q_MAX_MEMORY: %lu\n", q_config.max_memory);
+        printf("Q_FENCE_MEMORY: %lu\n", q_config.fence_memory);
+        printf("Q_FENCE_PENALTY: %f\n", q_config.fence_penalty);
         printf("Q_MEMORY_STEP: %u\n", q_config.memory_step);
 
         // Enable.
@@ -2039,7 +2055,7 @@ gc_reward_impl(PyObject *module, double value)
 
     // If negative reward, restart exploration.
     if (value < 0) {
-        q_state.evaluations = 0;
+        q_state.evaluations = 2 * q_config.epsilon_decay;
     }
 
     // Check whether we exceeded the size of the replay table.

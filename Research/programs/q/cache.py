@@ -30,7 +30,7 @@ def create_ll(size):
 
 
 def operation():
-    for i in range(500):
+    for i in range(2000):
         size = random.randint(2, 500)
         create_ll(size)
 
@@ -46,7 +46,7 @@ if __name__ == '__main__':
     def reward(t, m):
         if m > 25 << 20:
             gc.collect()
-            return -10
+            return -1
         else:
             return 10 - t
 
