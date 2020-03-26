@@ -69,6 +69,7 @@ def collect(operation, reward):
     while True:
         # Get the starting time.
         start = time.time()
+        random_start = gc.random_actions()
 
         # Perform operation with GC.
         gc.enable()
@@ -92,8 +93,8 @@ def collect(operation, reward):
 
         # Time since start.
         time_since_start = current_time - zero_time
-        if time_since_start > 60 * 5:
+        if time_since_start > 60 * 10:
             break
 
         # Print out statistics.
-        print('{},{},{}'.format(time_since_start, r, memory))
+        print('{},{},{},{}'.format(time_since_start, r, memory, gc.random_actions() - random_start))

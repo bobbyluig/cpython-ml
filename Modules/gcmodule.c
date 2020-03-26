@@ -57,35 +57,32 @@ uint64_t global_id = 0;
 // Objects scanned for learning GC.
 static size_t objects_scanned = 0;
 
-// Time spent for learning GC.
-static double gc_time = 0;
+// Q configuration.
+#define Q_NUM_ACTIONS 4
 
-// DQN configuration.
-#define DQN_NUM_ACTIONS 4
-
-// Struct for DQN observation.
-typedef struct DQNObservation {
+// Struct for Q observation.
+typedef struct QObservation {
     // Memory usage in bytes.
     uint64_t memory;
     // Instruction location.
     uint64_t instruction;
-} DQNObservation;
+} QObservation;
 
-// Struct for DQN transition to be stored in replay memory. Usually, we would use a sequence here. However, we simply
+// Struct for Q transition to be stored in replay memory. Usually, we would use a sequence here. However, we simply
 // use 1 observation.
-typedef struct DQNTransition {
+typedef struct QTransition {
     // The state before taking the action.
-    DQNObservation observation;
+    QObservation observation;
     // The reward associated with the transition.
     double reward;
     // The action taken.
     uint8_t action;
     // Whether or not the state is terminal.
     uint8_t is_terminal;
-} DQNTransition;
+} QTransition;
 
-// Struct for DQN config.
-static struct DQNConfig {
+// Struct for Q config.
+static struct QConfig {
     // Capacity for replay memory in bytes.
     uint64_t replay_size;
     // Learning rate for ANN.
@@ -102,14 +99,14 @@ static struct DQNConfig {
     uint64_t max_memory;
     // The memory step size.
     uint16_t memory_step;
-} dqn_config;
+} q_config;
 
-// Struct for DQN state.
-static struct DQNState {
+// Struct for Q state.
+static struct QState {
     // The sparse table representing Q-values.
     _Py_hashtable_t *q_table;
     // Replay memory.
-    DQNTransition *replay;
+    QTransition *replay;
     // The number of entries in the replay memory.
     uint64_t replay_capacity;
     // A circular index into the replay memory.
@@ -124,7 +121,9 @@ static struct DQNState {
     uint64_t random_actions;
     // Whether the learning GC is enabled.
     bool enabled;
-} dqn_state;
+    // Whether we've issued a warning about the replay table.
+    bool did_warn;
+} q_state;
 
 // Key for Q-table.
 typedef struct QKey {
@@ -132,34 +131,34 @@ typedef struct QKey {
     uint64_t packed;
 } QKey;
 
-/*** Begin DQN functions. ***/
+/*** Begin Q functions. ***/
 
 // Creates a Q-table key.
-static QKey dqn_create_key(uint64_t instruction, uint64_t memory) {
+static QKey q_create_key(uint64_t instruction, uint64_t memory) {
     // Memory should be capped.
-    if (memory > dqn_config.max_memory) {
-        memory = dqn_config.max_memory;
+    if (memory > q_config.max_memory) {
+        memory = q_config.max_memory;
     }
 
     // Quantize memory.
-    memory >>= dqn_config.memory_step;
+    memory >>= q_config.memory_step;
 
     // Pack instruction and memory.
     return (QKey) {.packed = (instruction << 16U) | memory};
 }
 
 // Gets the instruction of a Q-table key.
-static uint64_t dqn_key_instruction(QKey key) {
+static uint64_t q_key_instruction(QKey key) {
     return key.packed >> 16U;
 }
 
 // Gets the memory of a Q-table key.
-static uint64_t dqn_key_memory(QKey key) {
+static uint64_t q_key_memory(QKey key) {
     return key.packed & 0xFFFFU;
 }
 
 // Hashes a key.
-static Py_uhash_t dqn_hashtable_hash_key(_Py_hashtable_t *ht, const void *pkey) {
+static Py_uhash_t q_hashtable_hash_key(_Py_hashtable_t *ht, const void *pkey) {
     QKey key;
     _Py_HASHTABLE_READ_KEY(ht, pkey, key);
 
@@ -167,7 +166,7 @@ static Py_uhash_t dqn_hashtable_hash_key(_Py_hashtable_t *ht, const void *pkey) 
 }
 
 // Tests the equality of two double pointers.
-static int dqn_hashtable_compare_value(_Py_hashtable_t *ht, const void *pkey, const _Py_hashtable_entry_t *entry) {
+static int q_hashtable_compare_value(_Py_hashtable_t *ht, const void *pkey, const _Py_hashtable_entry_t *entry) {
     double *p1, *p2;
     _Py_HASHTABLE_READ_KEY(ht, pkey, p1);
     _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, p2);
@@ -176,30 +175,30 @@ static int dqn_hashtable_compare_value(_Py_hashtable_t *ht, const void *pkey, co
 }
 
 // Returns a random float in [0, 1).
-static double dqn_rand_float() {
+static double q_rand_float() {
     return ((double) rand() / ((double) RAND_MAX + 1));
 }
 
-//// Returns a random integer within the exclusive range [start, end).
-//static uint64_t dqn_rand_int(uint64_t start, uint64_t end) {
-//    return (rand() % (end - start)) + start;
-//}
+// Returns a random integer within the exclusive range [start, end).
+static uint64_t q_rand_int(uint64_t start, uint64_t end) {
+    return (rand() % (end - start)) + start;
+}
 
 // Converts statistics from GC to an observation.
-static DQNObservation dqn_to_observation(struct gc_learning_stats *stats) {
+static QObservation q_to_observation(struct gc_learning_stats *stats) {
     // Extract relevant information and normalize.
-    DQNObservation observation;
+    QObservation observation;
     observation.memory = stats->memory;
     observation.instruction = stats->instruction;
     return observation;
 }
 
 // Gets a Q-value table associated with a replay index.
-static double *dqn_get_table(uint64_t index) {
+static double *q_get_table(uint64_t index) {
     // Fetch the entry from the hashtable.
-    DQNObservation observation = dqn_state.replay[index].observation;
-    QKey key = dqn_create_key(observation.instruction, observation.memory);
-    _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(dqn_state.q_table, key);
+    QObservation observation = q_state.replay[index].observation;
+    QKey key = q_create_key(observation.instruction, observation.memory);
+    _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(q_state.q_table, key);
 
     // Pointer to table.
     double *table;
@@ -207,10 +206,10 @@ static double *dqn_get_table(uint64_t index) {
     // If the entry does not exist, allocate a new table. Otherwise, fetch the existing table.
     if (entry == NULL) {
         // All values are initially zero.
-        table = PyMem_Calloc(DQN_NUM_ACTIONS, sizeof(double));
-        _Py_HASHTABLE_SET(dqn_state.q_table, key, table);
+        table = PyMem_Calloc(Q_NUM_ACTIONS, sizeof(double));
+        _Py_HASHTABLE_SET(q_state.q_table, key, table);
     } else {
-        _Py_HASHTABLE_ENTRY_READ_DATA(dqn_state.q_table, entry, table);
+        _Py_HASHTABLE_ENTRY_READ_DATA(q_state.q_table, entry, table);
     }
 
     // Return the pointer to the table.
@@ -218,49 +217,49 @@ static double *dqn_get_table(uint64_t index) {
 }
 
 // Pushes a frame into reply memory.
-static void dqn_replay_push(DQNObservation *observation) {
+static void q_replay_push(QObservation *observation) {
     // Create transition.
-    DQNTransition transition;
+    QTransition transition;
     transition.observation = *observation;
     transition.reward = 0;
     transition.action = 0;
     transition.is_terminal = false;
 
     // Store into replay memory.
-    uint64_t index = dqn_state.replay_index++ % dqn_state.replay_capacity;
-    dqn_state.replay[index] = transition;
+    uint64_t index = q_state.replay_index++ % q_state.replay_capacity;
+    q_state.replay[index] = transition;
 }
 
 // The previous replay associated with a given index.
-static DQNTransition *dqn_previous_replay(uint64_t index) {
-    uint64_t previous_index = (index - 1) % dqn_state.replay_capacity;
-    return &(dqn_state.replay[previous_index]);
+static QTransition *q_previous_replay(uint64_t index) {
+    uint64_t previous_index = (index - 1) % q_state.replay_capacity;
+    return &(q_state.replay[previous_index]);
 }
 
 //// The next replay associated with a given index.
-//static DQNTransition *dqn_next_replay(uint64_t index) {
-//    uint64_t next_index = (index + 1) % dqn_state.replay_capacity;
-//    return &(dqn_state.replay[next_index]);
+//static QTransition *q_next_replay(uint64_t index) {
+//    uint64_t next_index = (index + 1) % q_state.replay_capacity;
+//    return &(q_state.replay[next_index]);
 //}
 
 // Gets the last frame in the replay memory.
-static DQNTransition *dqn_last_replay() {
-    return dqn_previous_replay(dqn_state.replay_index);
+static QTransition *q_last_replay() {
+    return q_previous_replay(q_state.replay_index);
 }
 
 //// Samples a random replay index.
-//static uint64_t dqn_sample_index(bool exclude_n) {
+//static uint64_t q_sample_index(bool exclude_n) {
 //    // If we are past the capacity, use the replay index as the index of the first value.
-//    return (dqn_state.replay_index > dqn_state.replay_capacity)
-//           ? (dqn_state.replay_index + dqn_rand_int(exclude_n - 1, dqn_state.replay_capacity - 1))
-//             % dqn_state.replay_capacity
-//           : dqn_rand_int(exclude_n - 1, dqn_state.replay_index - 1);
+//    return (q_state.replay_index > q_state.replay_capacity)
+//           ? (q_state.replay_index + q_rand_int(exclude_n - 1, q_state.replay_capacity - 1))
+//             % q_state.replay_capacity
+//           : q_rand_int(exclude_n - 1, q_state.replay_index - 1);
 //}
 
 // Finds the index of the action associated with the highest value.
-static uint8_t dqn_max_index(double *output) {
+static uint8_t q_max_index(double *output) {
     uint8_t best_index = 0;
-    for (int i = 1; i < DQN_NUM_ACTIONS; i++) {
+    for (int i = 1; i < Q_NUM_ACTIONS; i++) {
         if (output[i] > output[best_index]) {
             best_index = i;
         }
@@ -269,77 +268,73 @@ static uint8_t dqn_max_index(double *output) {
 }
 
 // Evaluates the policy function and returns the index of the best output.
-static uint8_t dqn_evaluate(uint64_t index) {
+static uint8_t q_evaluate(uint64_t index) {
     // Fetch the associated output from the table.
-    double *output = dqn_get_table(index);
+    double *output = q_get_table(index);
 
     // Find the best index.
-    return dqn_max_index(output);
+    return q_max_index(output);
 }
 
 // Selects an action based. Assumes the last observation is in the replay history.
-static uint8_t dqn_select_action() {
+static uint8_t q_select_action() {
     // Compute threshold.
-    double eps_threshold = dqn_config.epsilon_end + (dqn_config.epsilon_start - dqn_config.epsilon_end)
-            * exp(-1.0 * dqn_state.evaluations++ / dqn_config.epsilon_decay);
+    double eps_threshold = q_config.epsilon_end + (q_config.epsilon_start - q_config.epsilon_end)
+            * exp(-1.0 * q_state.evaluations / q_config.epsilon_decay);
 
     // Determine if we should use the model or choose a random action.
-    if (dqn_rand_float() > eps_threshold) {
+    if (q_rand_float() > eps_threshold) {
         // Evaluate using model and find maximum.
-        return dqn_evaluate((dqn_state.replay_index - 1) % dqn_state.replay_capacity);
+        return q_evaluate((q_state.replay_index - 1) % q_state.replay_capacity);
     } else {
         // Indicate that a random action was chose.
-        dqn_state.random_actions++;
+        q_state.random_actions++;
 
         // Generate a random number.
-        double r = dqn_rand_float();
+        double r = q_rand_float();
 
         // Choose a random action from a distribution.
-        if (r >= 1.0 / 700.0) {
+        if (r >= 1.0 / 1000.0) {
             return 0;
-        } else if (r >= 1.0 / 7000.0) {
-            return 1;
-        } else if (r >= 1.0 / 70000.0) {
-            return 2;
         } else {
-            return 3;
+            return q_rand_int(1, 4);
         }
     }
 }
 
 // Train on index.
-static void dqn_train_index(uint64_t index) {
+static void q_train_index(uint64_t index) {
     // Extract values.
-    uint8_t action = dqn_state.replay[index].action;
-    double reward = dqn_state.replay[index].reward;
+    uint8_t action = q_state.replay[index].action;
+    double reward = q_state.replay[index].reward;
 
     // Get this table.
-    double *table = dqn_get_table(index);
+    double *table = q_get_table(index);
 
     // If the state is terminal, just set the reward.
-    if (dqn_state.replay[index].is_terminal) {
+    if (q_state.replay[index].is_terminal) {
         table[action] = reward;
         return;
     }
 
     // Get future replay and table.
-    uint64_t future_index = (index + 1) % dqn_state.replay_capacity;
-    double *future_table = dqn_get_table(future_index);
+    uint64_t future_index = (index + 1) % q_state.replay_capacity;
+    double *future_table = q_get_table(future_index);
 
     // Estimate the optimal future value.
-    uint8_t future_action = dqn_evaluate(future_index);
+    uint8_t future_action = q_evaluate(future_index);
     double q_future = future_table[future_action];
 
     // Compute desired quality value.
     double old_y = table[action];
-    double y = old_y + dqn_config.learning_rate * (reward + dqn_config.gamma * q_future - old_y);
+    double y = old_y + q_config.learning_rate * (reward + q_config.gamma * q_future - old_y);
 
     // Update Q-value.
     table[action] = y;
 }
 
 // Frees a hashtable entry.
-static int dqn_free_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data) {
+static int q_free_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data) {
     // Read value.
     double *value;
     _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
@@ -350,7 +345,7 @@ static int dqn_free_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *
 }
 
 // Frees a hashtable entry.
-static int dqn_print_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data) {
+static int q_print_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data) {
     // Read key.
     QKey key;
     _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, key);
@@ -360,17 +355,17 @@ static int dqn_print_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t 
     _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
 
     // Find the maximum value.
-    uint8_t action = dqn_max_index(value);
+    uint8_t action = q_max_index(value);
 
     // Print key and value if the action is to collect.
     if (action > 0) {
-        printf("(%lu, %lu): %u\n", dqn_key_instruction(key), dqn_key_memory(key), action);
+        printf("(%lu, %lu): %u\n", q_key_instruction(key), q_key_memory(key), action);
     }
 
     return 0;
 }
 
-/*** End DQN functions. ***/
+/*** End Q functions. ***/
 
 /* set for debugging information */
 #define DEBUG_STATS             (1<<0) /* print collection statistics */
@@ -412,39 +407,40 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     };
 
     // Parse configuration parameters.
-    const char *dqn_replay_size = Py_GETENV("DQN_REPLAY_SIZE");
-    const char *dqn_learning_rate = Py_GETENV("DQN_LEARNING_RATE");
-    const char *dqn_epsilon_start = Py_GETENV("DQN_EPSILON_START");
-    const char *dqn_epsilon_end = Py_GETENV("DQN_EPSILON_END");
-    const char *dqn_epsilon_decay = Py_GETENV("DQN_EPSILON_DECAY");
-    const char *dqn_gamma = Py_GETENV("DQN_GAMMA");
-    const char *dqn_skip = Py_GETENV("DQN_SKIP");
-    const char *dqn_max_memory = Py_GETENV("DQN_MAX_MEMORY");
-    const char *dqn_memory_step = Py_GETENV("DQN_MEMORY_STEP");
-    dqn_config.replay_size = (dqn_replay_size != NULL) ? (uint64_t) atoll(dqn_replay_size) : (16ULL << 20U);
-    dqn_config.learning_rate = (dqn_learning_rate != NULL) ? atof(dqn_learning_rate) : 0.1;
-    dqn_config.epsilon_start = (dqn_epsilon_start != NULL) ? atof(dqn_epsilon_start) : 1.0;
-    dqn_config.epsilon_end = (dqn_epsilon_end != NULL) ? atof(dqn_epsilon_end) : 0.01;
-    dqn_config.epsilon_decay = (dqn_epsilon_decay != NULL) ? atof(dqn_epsilon_decay) : 100000.0;
-    dqn_config.gamma = (dqn_gamma != NULL) ? atof(dqn_gamma) : 0.999;
-    dqn_config.skip = (dqn_skip != NULL) ? (uint64_t) atoll(dqn_skip) : 16ULL;
-    dqn_config.max_memory = (dqn_max_memory != NULL) ? (uint64_t) atoll(dqn_max_memory) : (256ULL << 20U);
-    dqn_config.memory_step = (dqn_memory_step != NULL) ? (uint16_t) atoi(dqn_memory_step) : 20U;
+    const char *q_replay_size = Py_GETENV("Q_REPLAY_SIZE");
+    const char *q_learning_rate = Py_GETENV("Q_LEARNING_RATE");
+    const char *q_epsilon_start = Py_GETENV("Q_EPSILON_START");
+    const char *q_epsilon_end = Py_GETENV("Q_EPSILON_END");
+    const char *q_epsilon_decay = Py_GETENV("Q_EPSILON_DECAY");
+    const char *q_gamma = Py_GETENV("Q_GAMMA");
+    const char *q_skip = Py_GETENV("Q_SKIP");
+    const char *q_max_memory = Py_GETENV("Q_MAX_MEMORY");
+    const char *q_memory_step = Py_GETENV("Q_MEMORY_STEP");
+    q_config.replay_size = (q_replay_size != NULL) ? (uint64_t) atoll(q_replay_size) : (16ULL << 20U);
+    q_config.learning_rate = (q_learning_rate != NULL) ? atof(q_learning_rate) : 0.1;
+    q_config.epsilon_start = (q_epsilon_start != NULL) ? atof(q_epsilon_start) : 1.0;
+    q_config.epsilon_end = (q_epsilon_end != NULL) ? atof(q_epsilon_end) : 0.01;
+    q_config.epsilon_decay = (q_epsilon_decay != NULL) ? atof(q_epsilon_decay) : 10.0;
+    q_config.gamma = (q_gamma != NULL) ? atof(q_gamma) : 0.9999;
+    q_config.skip = (q_skip != NULL) ? (uint64_t) atoll(q_skip) : 10ULL;
+    q_config.max_memory = (q_max_memory != NULL) ? (uint64_t) atoll(q_max_memory) : (256ULL << 20U);
+    q_config.memory_step = (q_memory_step != NULL) ? (uint16_t) atoi(q_memory_step) : 20U;
 
     // Seed RNG.
     srand(time(NULL));
 
-    // Initialize DQN state.
-    dqn_state.q_table = _Py_hashtable_new(sizeof(QKey), sizeof(double *),
-                                          dqn_hashtable_hash_key, dqn_hashtable_compare_value);
-    dqn_state.replay_capacity = dqn_config.replay_size / sizeof(DQNTransition);
-    dqn_state.replay_index = 0;
-    dqn_state.last_replay_index = 0;
-    dqn_state.replay = PyMem_Malloc(dqn_state.replay_capacity * sizeof(DQNTransition));
-    dqn_state.evaluations = 0;
-    dqn_state.objects = 0;
-    dqn_state.random_actions = 0;
-    dqn_state.enabled = false;
+    // Initialize Q state.
+    q_state.q_table = _Py_hashtable_new(sizeof(QKey), sizeof(double *),
+                                          q_hashtable_hash_key, q_hashtable_compare_value);
+    q_state.replay_capacity = q_config.replay_size / sizeof(QTransition);
+    q_state.replay_index = 0;
+    q_state.last_replay_index = 0;
+    q_state.replay = PyMem_Malloc(q_state.replay_capacity * sizeof(QTransition));
+    q_state.evaluations = 0;
+    q_state.objects = 0;
+    q_state.random_actions = 0;
+    q_state.enabled = false;
+    q_state.did_warn = false;
 
     // Initialize learning stats.
     struct gc_learning_stats learning_stats = {};
@@ -1188,18 +1184,18 @@ clear_freelists(void)
 /* Method for learning GC to determine which generation to collect, or -1 for no collection. */
 static int _Py_HOT_FUNCTION
 learning_predict(struct gc_learning_stats *stats) {
-    // Determine whether we should use DQN. Otherwise, use the default GC.
-    if (dqn_state.enabled) {
+    // Determine whether we should use Q. Otherwise, use the default GC.
+    if (q_state.enabled) {
         // Determine whether it is time to use the policy function.
-        if (dqn_state.objects++ % dqn_config.skip != 0) {
+        if (q_state.objects++ % q_config.skip != 0) {
             return -1;
         }
 
         // Get the action and store to replay.
-        DQNObservation observation = dqn_to_observation(stats);
-        dqn_replay_push(&observation);
-        uint8_t action = dqn_select_action();
-        dqn_last_replay()->action = action;
+        QObservation observation = q_to_observation(stats);
+        q_replay_push(&observation);
+        uint8_t action = q_select_action();
+        q_last_replay()->action = action;
 
         // Convert to GC action.
         return ((int) action) - 1;
@@ -1262,9 +1258,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
     PyGC_Head finalizers;  /* objects with, & reachable from, __del__ */
     PyGC_Head *gc;
     _PyTime_t t1 = 0;   /* initialize to prevent a compiler warning */
-
-    // Start timer.
-    t1 = _PyTime_GetMonotonicClock();
 
     struct gc_generation_stats *stats = &_PyRuntime.gc.generation_stats[generation];
 
@@ -1480,10 +1473,6 @@ collect(int generation, Py_ssize_t *n_collected, Py_ssize_t *n_uncollectable,
 
     if (PyDTrace_GC_DONE_ENABLED())
         PyDTrace_GC_DONE(n+m);
-
-    // End timer.
-    _PyTime_t t2 = _PyTime_GetMonotonicClock();
-    gc_time += _PyTime_AsSecondsDouble(t2 - t1);
 
     return n+m;
 }
@@ -1976,30 +1965,30 @@ gc_get_freeze_count_impl(PyObject *module)
 }
 
 /*[clinic input]
-gc.dqn_enable
+gc.q_enable
 
-Enable DQN garbage collector.
+Enable Q garbage collector.
 [clinic start generated code]*/
 
 static PyObject *
-gc_dqn_enable_impl(PyObject *module)
-/*[clinic end generated code: output=82f7b75fed43d981 input=f7a948c34e10b8e2]*/
+gc_q_enable_impl(PyObject *module)
+/*[clinic end generated code: output=876ff9a0fae8b4d4 input=98aedde1964ea5a0]*/
 {
-    dqn_state.enabled = true;
+    q_state.enabled = true;
     Py_RETURN_NONE;
 }
 
 /*[clinic input]
-gc.dqn_disable
+gc.q_disable
 
-Disable DQN garbage collector.
+Disable Q garbage collector.
 [clinic start generated code]*/
 
 static PyObject *
-gc_dqn_disable_impl(PyObject *module)
-/*[clinic end generated code: output=ff4454c5d3ffbb2f input=4c5aa6253d94c4ea]*/
+gc_q_disable_impl(PyObject *module)
+/*[clinic end generated code: output=50ab8a8ccf4ce461 input=a51cf8c22e28f4bb]*/
 {
-    dqn_state.enabled = false;
+    q_state.enabled = false;
     Py_RETURN_NONE;
 }
 
@@ -2009,44 +1998,87 @@ gc.reward
     value: double
     /
 
-Set the reward for the DQN garbage collector.
+Set the reward for the Q garbage collector.
 [clinic start generated code]*/
 
 static PyObject *
 gc_reward_impl(PyObject *module, double value)
-/*[clinic end generated code: output=efd2b9b189133062 input=d7564bfac59014cd]*/
+/*[clinic end generated code: output=efd2b9b189133062 input=f5027af167558d9c]*/
 {
     // Not yet enabled. Enable and return.
-    if (!dqn_state.enabled) {
-        dqn_state.enabled = true;
+    if (!q_state.enabled) {
+        // Print Q-learning parameters.
+        printf("Q-Learning Parameters\n");
+        printf("Q_REPLAY_SIZE: %lu\n", q_config.replay_size);
+        printf("Q_LEARNING_RATE: %f\n", q_config.learning_rate);
+        printf("Q_EPSILON_START: %f\n", q_config.epsilon_start);
+        printf("Q_EPSILON_END: %f\n", q_config.epsilon_end);
+        printf("Q_EPSILON_DECAY: %f\n", q_config.epsilon_decay);
+        printf("Q_GAMMA: %f\n", q_config.gamma);
+        printf("Q_SKIP: %lu\n", q_config.skip);
+        printf("Q_MAX_MEMORY: %lu\n", q_config.max_memory);
+        printf("Q_MEMORY_STEP: %u\n", q_config.memory_step);
+
+        // Enable.
+        q_state.enabled = true;
         Py_RETURN_NONE;
     }
 
     // No new observations collected. Do nothing.
-    if (dqn_state.last_replay_index == dqn_state.replay_index) {
+    if (q_state.last_replay_index == q_state.replay_index) {
         Py_RETURN_NONE;
     }
 
-    // Apply reward to all observations.
-    if (dqn_state.replay_index - dqn_state.last_replay_index > dqn_state.replay_capacity) {
-        printf("Please increase the size of the replay table.\n");
-        for (uint64_t i = 0; i < dqn_state.replay_capacity; i++) {
-            dqn_state.replay[i].reward += value;
-        }
-    } else {
-        for (uint64_t i = dqn_state.last_replay_index; i < dqn_state.replay_index - 2; i++) {
-           dqn_state.replay[i % dqn_state.replay_capacity].reward += value;
-        }
+    // We did an observation pass.
+    if (q_state.last_replay_index == 0) {
+        printf("Saw %lu sites.\n", (q_state.replay_index - q_state.last_replay_index));
     }
 
-    // Do some training. The replay index is one after the last entry. We start at three before the replay index, which
-    // is the second to last entry and therefore has a next entry for future value computation.
-    for (uint64_t i = dqn_state.replay_index - 3; i != dqn_state.last_replay_index - 1; i--) {
-        dqn_train_index(i % dqn_state.replay_capacity);
+    // Increase evaluations for epsilon-greedy strategy.
+    q_state.evaluations++;
+
+    // If negative reward, restart exploration.
+    if (value < 0) {
+        q_state.evaluations = 0;
+    }
+
+    // Check whether we exceeded the size of the replay table.
+    if (q_state.replay_index - q_state.last_replay_index >= q_state.replay_capacity) {
+        // Warn about exceeding the replay table size.
+        if (!q_state.did_warn) {
+            q_state.did_warn = true;
+            printf("Please increase the size of the replay table.\n");
+        }
+
+        // Apply reward to everything in the replay table.
+        for (uint64_t i = 0; i < q_state.replay_capacity; i++) {
+            q_state.replay[i].reward += value;
+        }
+
+        // Do training on everything in the replay table backwards.
+        for (uint64_t i = q_state.replay_index; i != q_state.replay_index - q_state.replay_capacity; i--) {
+            q_train_index(i % q_state.replay_capacity);
+        }
+    } else {
+        // Apply reward to new observations.
+        for (uint64_t i = q_state.last_replay_index; i < q_state.replay_index; i++) {
+           q_state.replay[i % q_state.replay_capacity].reward += value;
+        }
+
+        // Try to find what the ending index is. We want to train on one before the last replay index if possible.
+        uint64_t end = (q_state.last_replay_index == 0)
+                ? q_state.last_replay_index - 1
+                : q_state.last_replay_index - 2;
+
+        // Do some training. The replay index is one after the last entry. We start at two before the replay index,
+        // which is the second to last entry and therefore has a next entry for future value computation.
+        for (uint64_t i = q_state.replay_index - 2; i != end; i--) {
+            q_train_index(i % q_state.replay_capacity);
+        }
     }
 
     // Set last replay index.
-    dqn_state.last_replay_index = dqn_state.replay_index;
+    q_state.last_replay_index = q_state.replay_index;
 
     // Return none.
     Py_RETURN_NONE;
@@ -2063,19 +2095,6 @@ gc_objects_scanned_impl(PyObject *module)
 /*[clinic end generated code: output=c5d34983275e0ab3 input=72c0a6619bb9466b]*/
 {
     return objects_scanned;
-}
-
-/*[clinic input]
-gc.gc_time -> double
-
-Return the total time spent in GC.
-[clinic start generated code]*/
-
-static double
-gc_gc_time_impl(PyObject *module)
-/*[clinic end generated code: output=1d3b713ab07b398f input=37d5f8782f9cc301]*/
-{
-    return gc_time;
 }
 
 /*[clinic input]
@@ -2101,7 +2120,7 @@ static Py_ssize_t
 gc_random_actions_impl(PyObject *module)
 /*[clinic end generated code: output=133936503d7dbfa1 input=4554699585433668]*/
 {
-    return dqn_state.random_actions;
+    return q_state.random_actions;
 }
 
 
@@ -2125,7 +2144,7 @@ PyDoc_STRVAR(gc__doc__,
 "freeze() -- Freeze all tracked objects and ignore them for future collections.\n"
 "unfreeze() -- Unfreeze all objects in the permanent generation.\n"
 "get_freeze_count() -- Return the number of objects in the permanent generation.\n"
-"reward() -- Set the reward for DQN GC.\n"
+"reward() -- Set the reward for Q GC.\n"
 "objects_scanned() -- The number of objects collected during GC.\n"
 "memory_usage() -- The memory usage in bytes.\n"
 );
@@ -2153,10 +2172,9 @@ static PyMethodDef GcMethods[] = {
     GC_REWARD_METHODDEF
     GC_OBJECTS_SCANNED_METHODDEF
     GC_MEMORY_USAGE_METHODDEF
-    GC_DQN_ENABLE_METHODDEF
-    GC_DQN_DISABLE_METHODDEF
+    GC_Q_ENABLE_METHODDEF
+    GC_Q_DISABLE_METHODDEF
     GC_RANDOM_ACTIONS_METHODDEF
-    GC_GC_TIME_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -2302,19 +2320,19 @@ _PyGC_Fini(void)
     Py_CLEAR(_PyRuntime.gc.callbacks);
 
     // Print metadata.
-    _Py_hashtable_foreach(dqn_state.q_table, dqn_print_hashtable_entry, NULL);
+    _Py_hashtable_foreach(q_state.q_table, q_print_hashtable_entry, NULL);
 
     // Print aggregate table statistics.
-    if (dqn_state.q_table->entries > 0) {
-        printf("Total entries: %lu\n", dqn_state.q_table->entries);
+    if (q_state.q_table->entries > 0) {
+        printf("Total entries: %lu\n", q_state.q_table->entries);
     }
 
     // Cleanup table.
-    _Py_hashtable_foreach(dqn_state.q_table, dqn_free_hashtable_entry, NULL);
+    _Py_hashtable_foreach(q_state.q_table, q_free_hashtable_entry, NULL);
 
-    // Cleanup DQN state.
-    _Py_hashtable_destroy(dqn_state.q_table);
-    PyMem_Free(dqn_state.replay);
+    // Cleanup Q state.
+    _Py_hashtable_destroy(q_state.q_table);
+    PyMem_Free(q_state.replay);
 }
 
 /* for debugging */
@@ -2378,7 +2396,12 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
         // Perform collection if necessary.
         if (generation != -1) {
             _PyRuntime.gc.collecting = 1;
+            _PyTime_t t1 = _PyTime_GetMonotonicClock();
             collect_with_callback(generation);
+            _PyTime_t t2 = _PyTime_GetMonotonicClock();
+            if (q_state.replay_index > 0) {
+                q_last_replay()->reward -= _PyTime_AsSecondsDouble(t2 - t1) / 100;
+            }
             _PyRuntime.gc.collecting = 0;
         }
     }

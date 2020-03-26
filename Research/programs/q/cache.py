@@ -46,7 +46,7 @@ if __name__ == '__main__':
     def reward(t, m):
         if m > 25 << 20:
             gc.collect()
-            return -50
+            return -10
         else:
             return 10 - t
 

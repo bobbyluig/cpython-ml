@@ -93,7 +93,7 @@ _PyMem_RawMalloc(void *ctx, size_t size)
     if (size == 0)
         size = 1;
     void* ptr = malloc(size);
-    memory_usage += malloc_usable_size(ptr);
+    __sync_fetch_and_add(&memory_usage, malloc_usable_size(ptr));
     return ptr;
 }
 
@@ -109,7 +109,7 @@ _PyMem_RawCalloc(void *ctx, size_t nelem, size_t elsize)
         elsize = 1;
     }
     void* ptr = calloc(nelem, elsize);
-    memory_usage += malloc_usable_size(ptr);
+    __sync_fetch_and_add(&memory_usage, malloc_usable_size(ptr));
     return ptr;
 }
 
@@ -118,16 +118,16 @@ _PyMem_RawRealloc(void *ctx, void *ptr, size_t size)
 {
     if (size == 0)
         size = 1;
-    memory_usage -= malloc_usable_size(ptr);
+    __sync_fetch_and_sub(&memory_usage, malloc_usable_size(ptr));
     ptr = realloc(ptr, size);
-    memory_usage += malloc_usable_size(ptr);
+    __sync_fetch_and_add(&memory_usage, malloc_usable_size(ptr));
     return ptr;
 }
 
 static void
 _PyMem_RawFree(void *ctx, void *ptr)
 {
-    memory_usage -= malloc_usable_size(ptr);
+    __sync_fetch_and_sub(&memory_usage, malloc_usable_size(ptr));
     free(ptr);
 }
 
@@ -1422,7 +1422,7 @@ pymalloc_alloc(void *ctx, size_t nbytes)
      * Most frequent paths first
      */
     size = (uint)(nbytes - 1) >> ALIGNMENT_SHIFT;
-    memory_usage += INDEX2SIZE(size);
+    __sync_fetch_and_add(&memory_usage, INDEX2SIZE(size));
     pool = usedpools[size + size];
     if (pool != pool->nextpool) {
         /*
@@ -1646,8 +1646,10 @@ pymalloc_free(void *ctx, void *p)
         return 0;
     }
     /* We allocated this address. */
-    memory_usage -= INDEX2SIZE(pool->szidx);
     LOCK();
+
+    // We need to ensure that the pool's header does not change.
+    __sync_fetch_and_sub(&memory_usage, INDEX2SIZE(pool->szidx));
 
     /* Link p to the start of the pool's freeblock list.  Since
      * the pool had at least the p block outstanding, the pool

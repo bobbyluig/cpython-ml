@@ -326,47 +326,47 @@ exit:
     return return_value;
 }
 
-PyDoc_STRVAR(gc_dqn_enable__doc__,
-"dqn_enable($module, /)\n"
+PyDoc_STRVAR(gc_q_enable__doc__,
+"q_enable($module, /)\n"
 "--\n"
 "\n"
-"Enable DQN garbage collector.");
+"Enable Q garbage collector.");
 
-#define GC_DQN_ENABLE_METHODDEF    \
-    {"dqn_enable", (PyCFunction)gc_dqn_enable, METH_NOARGS, gc_dqn_enable__doc__},
-
-static PyObject *
-gc_dqn_enable_impl(PyObject *module);
+#define GC_Q_ENABLE_METHODDEF    \
+    {"q_enable", (PyCFunction)gc_q_enable, METH_NOARGS, gc_q_enable__doc__},
 
 static PyObject *
-gc_dqn_enable(PyObject *module, PyObject *Py_UNUSED(ignored))
+gc_q_enable_impl(PyObject *module);
+
+static PyObject *
+gc_q_enable(PyObject *module, PyObject *Py_UNUSED(ignored))
 {
-    return gc_dqn_enable_impl(module);
+    return gc_q_enable_impl(module);
 }
 
-PyDoc_STRVAR(gc_dqn_disable__doc__,
-"dqn_disable($module, /)\n"
+PyDoc_STRVAR(gc_q_disable__doc__,
+"q_disable($module, /)\n"
 "--\n"
 "\n"
-"Disable DQN garbage collector.");
+"Disable Q garbage collector.");
 
-#define GC_DQN_DISABLE_METHODDEF    \
-    {"dqn_disable", (PyCFunction)gc_dqn_disable, METH_NOARGS, gc_dqn_disable__doc__},
-
-static PyObject *
-gc_dqn_disable_impl(PyObject *module);
+#define GC_Q_DISABLE_METHODDEF    \
+    {"q_disable", (PyCFunction)gc_q_disable, METH_NOARGS, gc_q_disable__doc__},
 
 static PyObject *
-gc_dqn_disable(PyObject *module, PyObject *Py_UNUSED(ignored))
+gc_q_disable_impl(PyObject *module);
+
+static PyObject *
+gc_q_disable(PyObject *module, PyObject *Py_UNUSED(ignored))
 {
-    return gc_dqn_disable_impl(module);
+    return gc_q_disable_impl(module);
 }
 
 PyDoc_STRVAR(gc_reward__doc__,
 "reward($module, value, /)\n"
 "--\n"
 "\n"
-"Set the reward for the DQN garbage collector.");
+"Set the reward for the Q garbage collector.");
 
 #define GC_REWARD_METHODDEF    \
     {"reward", (PyCFunction)gc_reward, METH_O, gc_reward__doc__},
@@ -412,34 +412,6 @@ gc_objects_scanned(PyObject *module, PyObject *Py_UNUSED(ignored))
         goto exit;
     }
     return_value = PyLong_FromSsize_t(_return_value);
-
-exit:
-    return return_value;
-}
-
-PyDoc_STRVAR(gc_gc_time__doc__,
-"gc_time($module, /)\n"
-"--\n"
-"\n"
-"Return the total time spent in GC.");
-
-#define GC_GC_TIME_METHODDEF    \
-    {"gc_time", (PyCFunction)gc_gc_time, METH_NOARGS, gc_gc_time__doc__},
-
-static double
-gc_gc_time_impl(PyObject *module);
-
-static PyObject *
-gc_gc_time(PyObject *module, PyObject *Py_UNUSED(ignored))
-{
-    PyObject *return_value = NULL;
-    double _return_value;
-
-    _return_value = gc_gc_time_impl(module);
-    if ((_return_value == -1.0) && PyErr_Occurred()) {
-        goto exit;
-    }
-    return_value = PyFloat_FromDouble(_return_value);
 
 exit:
     return return_value;
@@ -500,4 +472,4 @@ gc_random_actions(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=6037980f43545b15 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=019ec22212301268 input=a9049054013a1b77]*/

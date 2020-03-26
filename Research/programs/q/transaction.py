@@ -46,7 +46,8 @@ def simulate(a, b):
 
 
 def operation():
-    for i in range(200):
+    random.seed(0)
+    for i in range(1000):
         simulate(100, 2)
 
 
@@ -55,9 +56,9 @@ def operation():
 if __name__ == '__main__':
     # Reward function.
     def reward(t, m):
-        if m > 24000000:
+        if m > 26 << 20:
             gc.collect()
-            return -100
+            return -10
         else:
             return 10 - t
 
