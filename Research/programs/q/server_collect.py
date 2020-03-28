@@ -64,7 +64,7 @@ def reward():
         memory = gc.memory_usage()
 
         # Ran out of memory.
-        if memory > (500 << 20):
+        if memory > (140 << 20):
             gc.collect()
             r = -100
         else:

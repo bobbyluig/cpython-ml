@@ -182,10 +182,10 @@ static double q_rand_float() {
     return ((double) rand() / ((double) RAND_MAX + 1));
 }
 
-// Returns a random integer within the exclusive range [start, end).
-static uint64_t q_rand_int(uint64_t start, uint64_t end) {
-    return (rand() % (end - start)) + start;
-}
+//// Returns a random integer within the exclusive range [start, end).
+//static uint64_t q_rand_int(uint64_t start, uint64_t end) {
+//    return (rand() % (end - start)) + start;
+//}
 
 // Converts statistics from GC to an observation.
 static QObservation q_to_observation(struct gc_learning_stats *stats) {
@@ -306,8 +306,12 @@ static uint8_t q_select_action() {
         // Choose a random action from a distribution.
         if (r >= 1.0 / 1000.0) {
             return 0;
+        } else if (r >= 1.0 / 2000.0) {
+            return 1;
+        } else if (r >= 1.0 / 4000.0) {
+            return 2;
         } else {
-            return q_rand_int(1, 4);
+            return 3;
         }
     }
 }
@@ -2052,11 +2056,6 @@ gc_reward_impl(PyObject *module, double value)
 
     // Increase evaluations for epsilon-greedy strategy.
     q_state.evaluations++;
-
-    // If negative reward, restart exploration.
-    if (value < 0) {
-        q_state.evaluations = 2 * q_config.epsilon_decay;
-    }
 
     // Check whether we exceeded the size of the replay table.
     if (q_state.replay_index - q_state.last_replay_index >= q_state.replay_capacity) {

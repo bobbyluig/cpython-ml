@@ -1,5 +1,6 @@
-import requests
 import threading
+
+import requests
 from taiga import TaigaAPI
 
 # python3 manage.py flush --noinput && python3 manage.py loaddata initial_project_templates && python3 manage.py runserver
@@ -19,32 +20,42 @@ def register_user(username, email, password):
     return r.status_code == 201
 
 
-def action(username, password):
-    api = TaigaAPI(host=HOST)
-    api.auth(username, password)
+def action(api):
+    # Get the project.
+    project = api.projects.get(1)
 
-    # # Create a project.
-    # project = api.projects.create('Project', 'Description')
-    #
-    # # Update the description.
-    # project.name = 'Updated Description'
-    # project.update()
-    #
-    # # Delete the project.
-    # project.delete()
+    # List issues.
+    project.list_issues()
 
 
 # Function to repeat action.
-def run(username):
+def run():
     while True:
-        action(username, '123456')
+        action(api)
 
 
 # Create a user.
 register_user('user_1', 'user_1@example.com', '123456')
 
+# Auth.
+api = TaigaAPI(host=HOST)
+api.auth('user_1', '123456')
+
+# # Create a project.
+# new_project = api.projects.create('project', 'project')
+#
+# # Create many new issues.
+# for _ in range(1000):
+#     new_project.add_issue(
+#         'New Issue',
+#         new_project.priorities.get(name='High').id,
+#         new_project.issue_statuses.get(name='New').id,
+#         new_project.issue_types.get(name='Bug').id,
+#         new_project.severities.get(name='Minor').id,
+#         description='Bug #5'
+#     )
 
 # Create one thread per user.
 for i in range(32):
-    t = threading.Thread(target=run, args=(f'user_1',))
+    t = threading.Thread(target=run)
     t.start()

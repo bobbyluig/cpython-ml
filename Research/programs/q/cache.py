@@ -46,9 +46,9 @@ if __name__ == '__main__':
     def reward(t, m):
         if m > 25 << 20:
             gc.collect()
-            return -1
+            return -100
         else:
-            return 10 - t
+            return max(10 - t, 0)
 
     # Benchmark.
     collect(operation, reward)
