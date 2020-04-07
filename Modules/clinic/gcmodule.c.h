@@ -373,4 +373,94 @@ gc_get_freeze_count(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=e40d384b1f0d513c input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(gc_reward__doc__,
+"reward($module, value, /)\n"
+"--\n"
+"\n"
+"Set the reward for the Q garbage collector.");
+
+#define GC_REWARD_METHODDEF    \
+    {"reward", (PyCFunction)gc_reward, METH_O, gc_reward__doc__},
+
+static PyObject *
+gc_reward_impl(PyObject *module, double value);
+
+static PyObject *
+gc_reward(PyObject *module, PyObject *arg)
+{
+    PyObject *return_value = NULL;
+    double value;
+
+    if (PyFloat_CheckExact(arg)) {
+        value = PyFloat_AS_DOUBLE(arg);
+    }
+    else
+    {
+        value = PyFloat_AsDouble(arg);
+        if (value == -1.0 && PyErr_Occurred()) {
+            goto exit;
+        }
+    }
+    return_value = gc_reward_impl(module, value);
+
+exit:
+    return return_value;
+}
+
+PyDoc_STRVAR(gc_memory_usage__doc__,
+"memory_usage($module, /)\n"
+"--\n"
+"\n"
+"Return the current memory usage in bytes.");
+
+#define GC_MEMORY_USAGE_METHODDEF    \
+    {"memory_usage", (PyCFunction)gc_memory_usage, METH_NOARGS, gc_memory_usage__doc__},
+
+static Py_ssize_t
+gc_memory_usage_impl(PyObject *module);
+
+static PyObject *
+gc_memory_usage(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t _return_value;
+
+    _return_value = gc_memory_usage_impl(module);
+    if ((_return_value == -1) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyLong_FromSsize_t(_return_value);
+
+exit:
+    return return_value;
+}
+
+PyDoc_STRVAR(gc_random_actions__doc__,
+"random_actions($module, /)\n"
+"--\n"
+"\n"
+"Return the number of random actions taken.");
+
+#define GC_RANDOM_ACTIONS_METHODDEF    \
+    {"random_actions", (PyCFunction)gc_random_actions, METH_NOARGS, gc_random_actions__doc__},
+
+static Py_ssize_t
+gc_random_actions_impl(PyObject *module);
+
+static PyObject *
+gc_random_actions(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyObject *return_value = NULL;
+    Py_ssize_t _return_value;
+
+    _return_value = gc_random_actions_impl(module);
+    if ((_return_value == -1) && PyErr_Occurred()) {
+        goto exit;
+    }
+    return_value = PyLong_FromSsize_t(_return_value);
+
+exit:
+    return return_value;
+}
+/*[clinic end generated code: output=d83c70bb052d0d36 input=a9049054013a1b77]*/

@@ -31,6 +31,8 @@
 #include "frameobject.h"        /* for PyFrame_ClearFreeList */
 #include "pydtrace.h"
 #include "pytime.h"             /* for _PyTime_GetMonotonicClock() */
+#include "hashtable.h"
+#include "stdbool.h"
 
 /*[clinic input]
 module gc
@@ -125,6 +127,424 @@ static PyObject *gc_str = NULL;
 
 #define GEN_HEAD(state, n) (&(state)->generations[n].head)
 
+// Memory usage for learning GC. This value is written by `obmalloc.c`.
+size_t memory_usage = 0;
+
+// Q configuration.
+#define Q_NUM_ACTIONS 4
+
+// Struct for Q observation.
+typedef struct QObservation {
+    // Memory usage in bytes.
+    uint64_t memory;
+    // Instruction location.
+    uint64_t instruction;
+} QObservation;
+
+// Struct for Q transition to be stored in replay memory. Usually, we would use a sequence here. However, we simply
+// use 1 observation.
+typedef struct QTransition {
+    // The state before taking the action.
+    QObservation observation;
+    // The reward associated with the transition.
+    double reward;
+    // The action taken.
+    uint8_t action;
+} QTransition;
+
+// Struct for Q config.
+static struct QConfig {
+    // Capacity for replay memory in bytes.
+    uint64_t replay_size;
+    // Learning rate for ANN.
+    double learning_rate;
+    // Epsilon values for greedy strategy.
+    double epsilon_start;
+    double epsilon_end;
+    double epsilon_decay;
+    // Gamma value for non-terminal sequences.
+    double gamma;
+    // The number of objects to skip before performing evaluation.
+    uint64_t skip;
+    // The maximum memory in bytes for Q-table.
+    uint64_t max_memory;
+    // The fence memory and penalty.
+    uint64_t fence_memory;
+    double fence_penalty;
+    // The memory step size.
+    uint16_t memory_step;
+} q_config;
+
+// Struct for Q state.
+static struct QState {
+    // The sparse table representing Q-values.
+    _Py_hashtable_t *q_table;
+    // Replay memory.
+    QTransition *replay;
+    // The number of entries in the replay memory.
+    uint64_t replay_capacity;
+    // A circular index into the replay memory.
+    uint64_t replay_index;
+    // The last index that was sampled from. At most the replay index.
+    uint64_t last_replay_index;
+    // The number of evaluations.
+    uint64_t evaluations;
+    // The number of objects seen.
+    uint64_t objects;
+    // The number of random actions taken.
+    uint64_t random_actions;
+    // Whether the learning GC is enabled.
+    bool enabled;
+    // Whether we've issued a warning about the replay table.
+    bool did_warn;
+} q_state;
+
+// Key for Q-table.
+typedef struct QKey {
+    // The packed value including the instruction and the memory.
+    uint64_t packed;
+} QKey;
+
+/*** Begin Q functions. ***/
+
+// Creates a Q-table key.
+static QKey q_create_key(uint64_t instruction, uint64_t memory) {
+    // Memory should be capped.
+    if (memory > q_config.max_memory) {
+        memory = q_config.max_memory;
+    }
+
+    // Quantize memory.
+    memory >>= q_config.memory_step;
+
+    // Pack instruction and memory.
+    return (QKey) {.packed = (instruction << 16U) | memory};
+}
+
+// Gets the instruction of a Q-table key.
+static uint64_t q_key_instruction(QKey key) {
+    return key.packed >> 16U;
+}
+
+// Gets the memory of a Q-table key.
+static uint64_t q_key_memory(QKey key) {
+    return key.packed & 0xFFFFU;
+}
+
+// Hashes a key.
+static Py_uhash_t q_hashtable_hash_key(_Py_hashtable_t *ht, const void *pkey) {
+    QKey key;
+    _Py_HASHTABLE_READ_KEY(ht, pkey, key);
+
+    return key.packed;
+}
+
+// Tests the equality of two double pointers.
+static int q_hashtable_compare_value(_Py_hashtable_t *ht, const void *pkey, const _Py_hashtable_entry_t *entry) {
+    double *p1, *p2;
+    _Py_HASHTABLE_READ_KEY(ht, pkey, p1);
+    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, p2);
+
+    return p1 == p2;
+}
+
+// Seed for random number generator.
+uint32_t q_x, q_y, q_z;
+
+// Seed the random number generator.
+void q_seed_rand() {
+    // Seed rand() RNG.
+    srand(time(NULL));
+
+    // Get initial numbers.
+    q_x = rand();
+    q_y = rand();
+    q_z = rand();
+}
+
+// Generate a random number.
+uint32_t q_rand() {
+    uint32_t t;
+    
+    q_x ^= q_x << 16U;
+    q_x ^= q_x >> 5U;
+    q_x ^= q_x << 1U;
+
+    t = q_x;
+    q_x = q_y;
+    q_y = q_z;
+    q_z = t ^ q_x ^ q_y;
+
+    return q_z;
+}
+
+// Returns a random float in [0, 1).
+static double q_rand_float() {
+    return ((double) q_rand() / ((double) 0xFFFFFFFF + 1));
+}
+
+//// Returns a random integer within the exclusive range [start, end).
+//static uint64_t q_rand_int(uint64_t start, uint64_t end) {
+//    return (rand() % (end - start)) + start;
+//}
+
+// Takes an observation.
+static QObservation q_observation() {
+    QObservation observation;
+
+    // The memory is just the current memory.
+    observation.memory = memory_usage;
+
+    // Update the instruction location from the thread state.
+    PyThreadState *ts = PyThreadState_Get();
+    if (ts->frame != NULL && ts->frame->f_lasti >= 0) {
+        observation.instruction = ts->frame->f_code->co_id + ts->frame->f_lasti / sizeof(_Py_CODEUNIT);
+    } else {
+        observation.instruction = 0;
+    }
+
+    return observation;
+}
+
+// Gets a Q-value table associated with a replay index.
+static double *q_get_table(uint64_t index) {
+    // Fetch the entry from the hashtable.
+    QObservation observation = q_state.replay[index].observation;
+    QKey key = q_create_key(observation.instruction, observation.memory);
+    _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(q_state.q_table, key);
+
+    // Pointer to table.
+    double *table;
+
+    // If the entry does not exist, allocate a new table. Otherwise, fetch the existing table.
+    if (entry == NULL) {
+        // All values are initially zero.
+        table = PyMem_Calloc(Q_NUM_ACTIONS, sizeof(double));
+        _Py_HASHTABLE_SET(q_state.q_table, key, table);
+
+        // If over memory fence, penalize every state except full collection.
+        if (observation.memory > q_config.fence_memory) {
+            for (int i = 0; i < Q_NUM_ACTIONS - 1; i++) {
+                table[i] -= q_config.fence_penalty;
+            }
+        }
+    } else {
+        _Py_HASHTABLE_ENTRY_READ_DATA(q_state.q_table, entry, table);
+    }
+
+    // Return the pointer to the table.
+    return table;
+}
+
+// Pushes a frame into reply memory.
+static void q_replay_push(QObservation *observation) {
+    // Create transition.
+    QTransition transition;
+    transition.observation = *observation;
+    transition.reward = 0;
+    transition.action = 0;
+
+    // Store into replay memory.
+    uint64_t index = q_state.replay_index++ % q_state.replay_capacity;
+    q_state.replay[index] = transition;
+}
+
+// The previous replay associated with a given index.
+static QTransition *q_previous_replay(uint64_t index) {
+    uint64_t previous_index = (index - 1) % q_state.replay_capacity;
+    return &(q_state.replay[previous_index]);
+}
+
+//// The next replay associated with a given index.
+//static QTransition *q_next_replay(uint64_t index) {
+//    uint64_t next_index = (index + 1) % q_state.replay_capacity;
+//    return &(q_state.replay[next_index]);
+//}
+
+// Gets the last frame in the replay memory.
+static QTransition *q_last_replay() {
+    return q_previous_replay(q_state.replay_index);
+}
+
+// Untag pointer.
+static inline uintptr_t q_untag(uintptr_t ptr) {
+    return ptr & ~0x7ULL;
+}
+
+// Tag pointer.
+static inline uintptr_t q_tag(uintptr_t ptr, uintptr_t tag) {
+    return q_untag(ptr) | (tag & 0x7ULL);
+}
+
+// Finds the index of the action associated with the highest value.
+static uint8_t q_max_index(double *output) {
+    // Untag the pointer.
+    output = (double *) q_untag((uintptr_t) output);
+
+    // Find the best index.
+    uint8_t best_index = 0;
+    for (int i = 1; i < Q_NUM_ACTIONS; i++) {
+        if (output[i] > output[best_index]) {
+            best_index = i;
+        }
+    }
+    return best_index;
+}
+
+// Evaluates the policy function and returns the index of the best output.
+static uint8_t q_evaluate(uint64_t index) {
+    // Fetch the associated output from the table.
+    double *output = q_get_table(index);
+
+    // If the 3rd to last bit is set, then the decision is cached.
+    if ((uintptr_t) output & 0x4U) {
+        return (uintptr_t) output & 0x3U;
+    }
+
+    // Find the best index.
+    uint8_t max_index = q_max_index(output);
+
+    // The table must now exist, so fetch it from the hashtable.
+    QObservation observation = q_state.replay[index].observation;
+    QKey key = q_create_key(observation.instruction, observation.memory);
+    _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(q_state.q_table, key);
+
+    // Set the best index.
+    uint64_t tagged_ptr = q_tag((uintptr_t) output, 0x4U | max_index);
+    _Py_HASHTABLE_ENTRY_WRITE_DATA(q_state.q_table, entry, tagged_ptr);
+
+    // Return the best index.
+    return max_index;
+}
+
+// Selects an action based. Assumes the last observation is in the replay history.
+static uint8_t q_select_action() {
+    // Compute threshold.
+    double eps_threshold = q_config.epsilon_end + (q_config.epsilon_start - q_config.epsilon_end)
+                                                  * exp(-1.0 * q_state.evaluations / q_config.epsilon_decay);
+
+    // Determine if we should use the model or choose a random action.
+    if (q_rand_float() > eps_threshold) {
+        // Evaluate using model and find maximum.
+        return q_evaluate((q_state.replay_index - 1) % q_state.replay_capacity);
+    } else {
+        // Indicate that a random action was chose.
+        q_state.random_actions++;
+
+        // Generate a random number.
+        double r = q_rand_float();
+
+        // Choose a random action from a distribution.
+        if (r >= 1.0 / 1000.0) {
+            return 0;
+        } else if (r >= 1.0 / 2000.0) {
+            return 1;
+        } else if (r >= 1.0 / 10000.0) {
+            return 2;
+        } else {
+            return 3;
+        }
+    }
+}
+
+// Train on index.
+static void q_train_index(uint64_t index) {
+    // Extract values.
+    uint8_t action = q_state.replay[index].action;
+    double reward = q_state.replay[index].reward;
+
+    // Get this table.
+    double *table = q_get_table(index);
+
+    // Get future replay and table.
+    uint64_t future_index = (index + 1) % q_state.replay_capacity;
+    double *future_table = q_get_table(future_index);
+
+    // Estimate the optimal future value.
+    uint8_t future_action = q_evaluate(future_index);
+    double q_future = future_table[future_action];
+
+    // Compute desired quality value.
+    double old_y = table[action];
+    double y = old_y + q_config.learning_rate * (reward + q_config.gamma * q_future - old_y);
+
+    // Update Q-value.
+    table[action] = y;
+}
+
+// Frees a hashtable entry.
+static int q_free_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data) {
+    // Read value.
+    double *value;
+    _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
+
+    // Free value.
+    PyMem_Free(value);
+    return 0;
+}
+
+// Frees a hashtable entry.
+static int q_print_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data) {
+    // Read key.
+    QKey key;
+    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, key);
+
+    // Read value.
+    double *value;
+    _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
+
+    // Find the maximum value.
+    uint8_t action = q_max_index(value);
+
+    // Print key and value if the action is to collect.
+    if (action > 0) {
+        printf("(%lu, %lu): %u\n", q_key_instruction(key), q_key_memory(key), action);
+    }
+
+    return 0;
+}
+
+// Method to determine which generation to collect, or -1 for no collection.
+static int _Py_HOT_FUNCTION
+learning_predict(struct _gc_runtime_state *state) {
+    // Determine whether we should use Q. Otherwise, use the default GC.
+    if (q_state.enabled) {
+        // Determine whether it is time to use the policy function.
+        if (q_state.objects++ % q_config.skip != 0) {
+            return -1;
+        }
+
+        // Get the action and store to replay.
+        QObservation observation = q_observation();
+        q_replay_push(&observation);
+        uint8_t action = q_select_action();
+        q_last_replay()->action = action;
+
+        // Convert to GC action.
+        return ((int) action) - 1;
+    }
+
+    // If the count of generation 0 does not exceed the threshold, do nothing.
+    if (state->generations[0].count <= state->generations[0].threshold) {
+        return -1;
+    }
+
+    // Determine which generation to collect.
+    for (int i = NUM_GENERATIONS - 1; i >= 1; i--) {
+        if (state->generations[i].count > state->generations[i].threshold) {
+            if (i == NUM_GENERATIONS - 1 && state->long_lived_pending < state->long_lived_total / 4) {
+                continue;
+            }
+            return i;
+        }
+    }
+
+    // The first generation should be collected.
+    return 0;
+}
+
+/*** End Q functions. ***/
+
 void
 _PyGC_Initialize(struct _gc_runtime_state *state)
 {
@@ -146,6 +566,46 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
            (uintptr_t)&state->permanent_generation.head}, 0, 0
     };
     state->permanent_generation = permanent_generation;
+
+    // Parse configuration parameters.
+    const char *q_replay_size = Py_GETENV("Q_REPLAY_SIZE");
+    const char *q_learning_rate = Py_GETENV("Q_LEARNING_RATE");
+    const char *q_epsilon_start = Py_GETENV("Q_EPSILON_START");
+    const char *q_epsilon_end = Py_GETENV("Q_EPSILON_END");
+    const char *q_epsilon_decay = Py_GETENV("Q_EPSILON_DECAY");
+    const char *q_gamma = Py_GETENV("Q_GAMMA");
+    const char *q_skip = Py_GETENV("Q_SKIP");
+    const char *q_max_memory = Py_GETENV("Q_MAX_MEMORY");
+    const char *q_fence_memory = Py_GETENV("Q_FENCE_MEMORY");
+    const char *q_fence_penalty = Py_GETENV("Q_FENCE_PENALTY");
+    const char *q_memory_step = Py_GETENV("Q_MEMORY_STEP");
+    q_config.replay_size = (q_replay_size != NULL) ? (uint64_t) atoll(q_replay_size) : (16ULL << 20U);
+    q_config.learning_rate = (q_learning_rate != NULL) ? atof(q_learning_rate) : 0.1;
+    q_config.epsilon_start = (q_epsilon_start != NULL) ? atof(q_epsilon_start) : 1.0;
+    q_config.epsilon_end = (q_epsilon_end != NULL) ? atof(q_epsilon_end) : 0.01;
+    q_config.epsilon_decay = (q_epsilon_decay != NULL) ? atof(q_epsilon_decay) : 10.0;
+    q_config.gamma = (q_gamma != NULL) ? atof(q_gamma) : 0.9999;
+    q_config.skip = (q_skip != NULL) ? (uint64_t) atoll(q_skip) : 10ULL;
+    q_config.max_memory = (q_max_memory != NULL) ? (uint64_t) atoll(q_max_memory) : (256ULL << 20U);
+    q_config.fence_memory = (q_fence_memory != NULL) ? (uint64_t) atoll(q_fence_memory) : q_config.max_memory;
+    q_config.fence_penalty = (q_fence_penalty != NULL) ? atof(q_fence_penalty) : 1.0;
+    q_config.memory_step = (q_memory_step != NULL) ? (uint16_t) atoi(q_memory_step) : 20U;
+
+    // Seed RNG.
+    q_seed_rand();
+
+    // Initialize Q state.
+    q_state.q_table = _Py_hashtable_new(sizeof(QKey), sizeof(double *),
+                                        q_hashtable_hash_key, q_hashtable_compare_value);
+    q_state.replay_capacity = q_config.replay_size / sizeof(QTransition);
+    q_state.replay_index = 0;
+    q_state.last_replay_index = 0;
+    q_state.replay = PyMem_Malloc(q_state.replay_capacity * sizeof(QTransition));
+    q_state.evaluations = 0;
+    q_state.objects = 0;
+    q_state.random_actions = 0;
+    q_state.enabled = false;
+    q_state.did_warn = false;
 }
 
 /*
@@ -1243,28 +1703,28 @@ collect_with_callback(struct _gc_runtime_state *state, int generation)
     return result;
 }
 
-static Py_ssize_t
-collect_generations(struct _gc_runtime_state *state)
-{
-    /* Find the oldest generation (highest numbered) where the count
-     * exceeds the threshold.  Objects in the that generation and
-     * generations younger than it will be collected. */
-    Py_ssize_t n = 0;
-    for (int i = NUM_GENERATIONS-1; i >= 0; i--) {
-        if (state->generations[i].count > state->generations[i].threshold) {
-            /* Avoid quadratic performance degradation in number
-               of tracked objects. See comments at the beginning
-               of this file, and issue #4074.
-            */
-            if (i == NUM_GENERATIONS - 1
-                && state->long_lived_pending < state->long_lived_total / 4)
-                continue;
-            n = collect_with_callback(state, i);
-            break;
-        }
-    }
-    return n;
-}
+//static Py_ssize_t
+//collect_generations(struct _gc_runtime_state *state)
+//{
+//    /* Find the oldest generation (highest numbered) where the count
+//     * exceeds the threshold.  Objects in the that generation and
+//     * generations younger than it will be collected. */
+//    Py_ssize_t n = 0;
+//    for (int i = NUM_GENERATIONS-1; i >= 0; i--) {
+//        if (state->generations[i].count > state->generations[i].threshold) {
+//            /* Avoid quadratic performance degradation in number
+//               of tracked objects. See comments at the beginning
+//               of this file, and issue #4074.
+//            */
+//            if (i == NUM_GENERATIONS - 1
+//                && state->long_lived_pending < state->long_lived_total / 4)
+//                continue;
+//            n = collect_with_callback(state, i);
+//            break;
+//        }
+//    }
+//    return n;
+//}
 
 #include "clinic/gcmodule.c.h"
 
@@ -1715,6 +2175,117 @@ gc_get_freeze_count_impl(PyObject *module)
     return gc_list_size(&_PyRuntime.gc.permanent_generation.head);
 }
 
+/*[clinic input]
+gc.reward
+    value: double
+    /
+Set the reward for the Q garbage collector.
+[clinic start generated code]*/
+
+static PyObject *
+gc_reward_impl(PyObject *module, double value)
+/*[clinic end generated code: output=efd2b9b189133062 input=155fd6d53e69e8b2]*/
+{
+    // Not yet enabled. Enable and return.
+    if (!q_state.enabled) {
+        // Print Q-learning parameters.
+        printf("Q-Learning Parameters\n");
+        printf("Q_REPLAY_SIZE: %lu\n", q_config.replay_size);
+        printf("Q_LEARNING_RATE: %f\n", q_config.learning_rate);
+        printf("Q_EPSILON_START: %f\n", q_config.epsilon_start);
+        printf("Q_EPSILON_END: %f\n", q_config.epsilon_end);
+        printf("Q_EPSILON_DECAY: %f\n", q_config.epsilon_decay);
+        printf("Q_GAMMA: %f\n", q_config.gamma);
+        printf("Q_SKIP: %lu\n", q_config.skip);
+        printf("Q_MAX_MEMORY: %lu\n", q_config.max_memory);
+        printf("Q_FENCE_MEMORY: %lu\n", q_config.fence_memory);
+        printf("Q_FENCE_PENALTY: %f\n", q_config.fence_penalty);
+        printf("Q_MEMORY_STEP: %u\n", q_config.memory_step);
+
+        // Enable.
+        q_state.enabled = true;
+        Py_RETURN_NONE;
+    }
+
+    // No new observations collected. Do nothing.
+    if (q_state.last_replay_index == q_state.replay_index) {
+        Py_RETURN_NONE;
+    }
+
+    // We did an observation pass.
+    if (q_state.last_replay_index == 0) {
+        printf("Saw %lu sites.\n", (q_state.replay_index - q_state.last_replay_index));
+    }
+
+    // Increase evaluations for epsilon-greedy strategy.
+    q_state.evaluations++;
+
+    // Check whether we exceeded the size of the replay table.
+    if (q_state.replay_index - q_state.last_replay_index >= q_state.replay_capacity) {
+        // Warn about exceeding the replay table size.
+        if (!q_state.did_warn) {
+            q_state.did_warn = true;
+            printf("Please increase the size of the replay table.\n");
+        }
+
+        // Apply reward to everything in the replay table.
+        for (uint64_t i = 0; i < q_state.replay_capacity; i++) {
+            q_state.replay[i].reward += value;
+        }
+
+        // Do training on everything in the replay table backwards.
+        for (uint64_t i = q_state.replay_index; i != q_state.replay_index - q_state.replay_capacity; i--) {
+            q_train_index(i % q_state.replay_capacity);
+        }
+    } else {
+        // Apply reward to new observations.
+        for (uint64_t i = q_state.last_replay_index; i < q_state.replay_index; i++) {
+            q_state.replay[i % q_state.replay_capacity].reward += value;
+        }
+
+        // Try to find what the ending index is. We want to train on one before the last replay index if possible.
+        uint64_t end = (q_state.last_replay_index == 0)
+                       ? q_state.last_replay_index - 1
+                       : q_state.last_replay_index - 2;
+
+        // Do some training. The replay index is one after the last entry. We start at two before the replay index,
+        // which is the second to last entry and therefore has a next entry for future value computation.
+        for (uint64_t i = q_state.replay_index - 2; i != end; i--) {
+            q_train_index(i % q_state.replay_capacity);
+        }
+    }
+
+    // Set last replay index.
+    q_state.last_replay_index = q_state.replay_index;
+
+    // Return none.
+    Py_RETURN_NONE;
+}
+
+/*[clinic input]
+gc.memory_usage -> Py_ssize_t
+Return the current memory usage in bytes.
+[clinic start generated code]*/
+
+static Py_ssize_t
+gc_memory_usage_impl(PyObject *module)
+/*[clinic end generated code: output=6bf0a65d36800cc7 input=9dcbf3d29dfa5bd9]*/
+{
+    return memory_usage;
+}
+
+/*[clinic input]
+gc.random_actions -> Py_ssize_t
+Return the number of random actions taken.
+[clinic start generated code]*/
+
+static Py_ssize_t
+gc_random_actions_impl(PyObject *module)
+/*[clinic end generated code: output=133936503d7dbfa1 input=15be10bb87d5f818]*/
+{
+    return q_state.random_actions;
+}
+
 
 PyDoc_STRVAR(gc__doc__,
 "This module provides access to the garbage collector for reference cycles.\n"
@@ -1757,6 +2328,9 @@ static PyMethodDef GcMethods[] = {
     GC_FREEZE_METHODDEF
     GC_UNFREEZE_METHODDEF
     GC_GET_FREEZE_COUNT_METHODDEF
+    GC_REWARD_METHODDEF
+    GC_MEMORY_USAGE_METHODDEF
+    GC_RANDOM_ACTIONS_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -1912,6 +2486,21 @@ _PyGC_Fini(_PyRuntimeState *runtime)
     struct _gc_runtime_state *state = &runtime->gc;
     Py_CLEAR(state->garbage);
     Py_CLEAR(state->callbacks);
+
+    // Print metadata.
+    _Py_hashtable_foreach(q_state.q_table, q_print_hashtable_entry, NULL);
+
+    // Print aggregate table statistics.
+    if (q_state.q_table->entries > 0) {
+        printf("Total entries: %lu\n", q_state.q_table->entries);
+    }
+
+    // Cleanup table.
+    _Py_hashtable_foreach(q_state.q_table, q_free_hashtable_entry, NULL);
+
+    // Cleanup Q state.
+    _Py_hashtable_destroy(q_state.q_table);
+    PyMem_Free(q_state.replay);
 }
 
 /* for debugging */
@@ -1968,15 +2557,25 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
     g->_gc_next = 0;
     g->_gc_prev = 0;
     state->generations[0].count++; /* number of allocated GC objects */
-    if (state->generations[0].count > state->generations[0].threshold &&
-        state->enabled &&
-        state->generations[0].threshold &&
-        !state->collecting &&
-        !PyErr_Occurred()) {
-        state->collecting = 1;
-        collect_generations(state);
-        state->collecting = 0;
+
+    // Determine if collection should occur and which generation to collect.
+    if (state->enabled && !state->collecting && !PyErr_Occurred()) {
+        // Make a prediction.
+        int generation = learning_predict(state);
+
+        // Perform collection if necessary.
+        if (generation != -1) {
+            _PyTime_t t1 = _PyTime_GetMonotonicClock();
+            _PyRuntime.gc.collecting = 1;
+            collect_with_callback(state, generation);
+            _PyRuntime.gc.collecting = 0;
+            _PyTime_t t2 = _PyTime_GetMonotonicClock();
+            if (q_state.replay_index > 0) {
+                q_last_replay()->reward -= _PyTime_AsSecondsDouble(t2 - t1) / 100;
+            }
+        }
     }
+
     op = FROM_GC(g);
     return op;
 }

@@ -9,6 +9,9 @@
 #include "pycore_tupleobject.h"
 #include "clinic/codeobject.c.h"
 
+// Global counter for assigning IDs to bytecode instructions.
+static uint64_t global_id = 0;
+
 /* Holder for co_extra information */
 typedef struct {
     Py_ssize_t ce_size;
@@ -213,6 +216,11 @@ PyCode_NewWithPosOnlyArgs(int argcount, int posonlyargcount, int kwonlyargcount,
     co->co_flags = flags;
     Py_INCREF(code);
     co->co_code = code;
+
+    // Update the global ID for this section of code.
+    co->co_id = global_id;
+    global_id += PyBytes_GET_SIZE(co->co_code) / sizeof(_Py_CODEUNIT);
+
     Py_INCREF(consts);
     co->co_consts = consts;
     Py_INCREF(names);
