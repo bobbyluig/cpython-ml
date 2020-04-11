@@ -51,8 +51,8 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
-#include "opic/common/op_assert.h"
-#include "opic/common/op_utils.h"
+#include "../common/op_assert.h"
+#include "../common/op_utils.h"
 #include "op_hash_table.h"
 
 #define PROBE_STATS_SIZE 64

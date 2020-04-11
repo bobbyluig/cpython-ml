@@ -34,7 +34,7 @@
 
 #define likely(x) (__builtin_expect(!!(x), 1))
 
-#ifdef LITTLE_ENDIAN
+#ifndef WORDS_BIGENDIAN
 #define uint32_t_in_expected_order(x) (x)
 #define uint64_t_in_expected_order(x) (x)
 #else

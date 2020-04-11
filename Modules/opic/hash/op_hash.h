@@ -25,7 +25,7 @@
 #ifndef OPIC_HASH_OP_HASH_H
 #define OPIC_HASH_OP_HASH_H 1
 
-#include "opic/common/op_macros.h"
+#include "../common/op_macros.h"
 #include "cityhash.h"
 
 OP_BEGIN_DECLS

@@ -27,7 +27,7 @@
 #define OPIC_HASH_HASH_TABLE_H 1
 
 #include <stdbool.h>
-#include "opic/common/op_macros.h"
+#include "../common/op_macros.h"
 #include "op_hash.h"
 
 OP_BEGIN_DECLS
