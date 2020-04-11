@@ -29,7 +29,6 @@
 #include <stdbool.h>
 #include "opic/common/op_macros.h"
 #include "op_hash.h"
-#include "opic/op_malloc.h"
 
 OP_BEGIN_DECLS
 
@@ -78,7 +77,7 @@ typedef struct HTFunnel HTFunnel;
  * can be zero and the hash table would work like a hash set.
  * @return OPHashTable instance if allocation succeeded, else return NULL.
  */
-OPHashTable* HTNew(OPHeap* heap, uint64_t num_objects,
+OPHashTable* HTNew(uint64_t num_objects,
                    double load, size_t keysize, size_t valsize);
 
 /**

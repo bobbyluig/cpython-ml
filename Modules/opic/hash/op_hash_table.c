@@ -53,7 +53,6 @@
 #include <stdbool.h>
 #include "opic/common/op_assert.h"
 #include "opic/common/op_utils.h"
-#include "opic/op_malloc.h"
 #include "op_hash_table.h"
 
 #define PROBE_STATS_SIZE 64
@@ -93,14 +92,14 @@ struct OPHashTable
   size_t keysize;
   size_t valsize;
   uint32_t stats[PROBE_STATS_SIZE];
-  opref_t bucket_ref;
+  void* bucket_ref;
 };
 
 static inline
 uint64_t HTCapacityInternal(uint8_t capacity_clz, uint8_t capacity_ms4b);
 
 OPHashTable*
-HTNew(OPHeap* heap, uint64_t num_objects, double load,
+HTNew(uint64_t num_objects, double load,
       size_t keysize, size_t valsize)
 {
   OPHashTable* table;
@@ -121,16 +120,16 @@ HTNew(OPHeap* heap, uint64_t num_objects, double load,
 
   bucket_size = keysize + valsize + 1;
 
-  table = OPCalloc(heap, 1, sizeof(OPHashTable));
+  table = calloc(1, sizeof(OPHashTable));
   if (!table)
     return NULL;
-  bucket_ptr = OPCalloc(heap, 1, bucket_size * capacity);
+  bucket_ptr = calloc(1, bucket_size * capacity);
   if (!bucket_ptr)
     {
-      OPDealloc(table);
+      free(table);
       return NULL;
     }
-  table->bucket_ref = OPPtr2Ref(bucket_ptr);
+  table->bucket_ref = bucket_ptr;
   table->large_data_threshold = DEFAULT_LARGE_DATA_THRESHOLD;
   table->capacity_clz = capacity_clz;
   table->capacity_ms4b = capacity_ms4b;
@@ -144,8 +143,8 @@ HTNew(OPHeap* heap, uint64_t num_objects, double load,
 void
 HTDestroy(OPHashTable* table)
 {
-  OPDealloc(OPRef2Ptr(table, table->bucket_ref));
-  OPDealloc(table);
+  free((void*) table->bucket_ref);
+  free(table);
 }
 
 uint64_t HTObjcnt(OPHashTable* table)
@@ -232,7 +231,7 @@ findprobe(OPHashTable* table, OPHash hasher, uintptr_t idx)
   const size_t keysize = table->keysize;
   const size_t valsize = table->valsize;
   const size_t bucket_size = keysize + valsize + 1;
-  uint8_t* buckets = OPRef2Ptr(table, table->bucket_ref);
+  uint8_t* buckets = table->bucket_ref;
   uint64_t hashed_key, probing_key, probing_idx;
   uint64_t mask = (1ULL << (64 - table->capacity_clz)) - 1;
 
@@ -271,7 +270,7 @@ HTUpsertNewKey(OPHashTable* table, OPHash hasher,
   int probe, old_probe;
   uintptr_t idx, _idx;
 
-  buckets = OPRef2Ptr(table, table->bucket_ref);
+  buckets = table->bucket_ref;
   probe = 0;
 
   while (true)
@@ -281,7 +280,7 @@ HTUpsertNewKey(OPHashTable* table, OPHash hasher,
         {
           HTSizeUp(table, hasher);
           probe = 0;
-          buckets = OPRef2Ptr(table, table->bucket_ref);
+          buckets = table->bucket_ref;
           continue;
         }
       // empty bucket
@@ -349,7 +348,7 @@ HTUpsertPushDown(OPHashTable* table, OPHash hasher,
   visit = 0;
   *resized = false;
   hashed_key = hasher(&bucket_cpy[1], keysize);
-  buckets = OPRef2Ptr(table, table->bucket_ref);
+  buckets = table->bucket_ref;
   capacity = HTCapacity(table);
   iter = 0;
 
@@ -365,7 +364,7 @@ HTUpsertPushDown(OPHashTable* table, OPHash hasher,
           capacity = HTCapacity(table);
           iter = 0;
           probe = 0;
-          buckets = OPRef2Ptr(table, table->bucket_ref);
+          buckets = table->bucket_ref;
           *resized = true;
           continue;
         }
@@ -442,7 +441,7 @@ HTSizeUp(OPHashTable* table, OPHash hasher)
   bool resized;
 
   old_capacity = HTCapacity(table);
-  old_buckets = OPRef2Ptr(table, table->bucket_ref);
+  old_buckets = table->bucket_ref;
 
   if (old_capacity * bucket_size >= large_data_threshold)
     {
@@ -484,7 +483,7 @@ HTSizeUp(OPHashTable* table, OPHash hasher)
     }
   new_capacity = HTCapacityInternal(new_capacity_clz, new_capacity_ms4b);
 
-  new_buckets = OPCalloc(ObtainOPHeap(table), 1, bucket_size * new_capacity);
+  new_buckets = calloc(1, bucket_size * new_capacity);
   if (!new_buckets)
     {
       return false;
@@ -497,7 +496,7 @@ HTSizeUp(OPHashTable* table, OPHash hasher)
   table->capacity_ms4b = new_capacity_ms4b;
   table->longest_probes = 0;
   memset(table->stats, 0x00, sizeof(uint32_t) * PROBE_STATS_SIZE);
-  table->bucket_ref = OPPtr2Ref(new_buckets);
+  table->bucket_ref = new_buckets;
 
   for (uint64_t idx = 0; idx < old_capacity; idx++)
     {
@@ -507,7 +506,7 @@ HTSizeUp(OPHashTable* table, OPHash hasher)
                            0, NULL, &resized);
         }
     }
-  OPDealloc(old_buckets);
+  free(old_buckets);
   return true;
 }
 
@@ -524,7 +523,7 @@ HTSizeDown(OPHashTable* table, OPHash hasher)
   bool resized;
 
   old_capacity = HTCapacity(table);
-  old_buckets = OPRef2Ptr(table, table->bucket_ref);
+  old_buckets = table->bucket_ref;
   op_assert(old_capacity > 16,
             "Can not resize smaller than 16, but got old_capacity %"
             PRIu64 "\n", old_capacity);
@@ -550,7 +549,7 @@ HTSizeDown(OPHashTable* table, OPHash hasher)
     }
 
   new_capacity = HTCapacityInternal(new_capacity_clz, new_capacity_ms4b);
-  new_buckets = OPCalloc(ObtainOPHeap(table), 1, bucket_size * new_capacity);
+  new_buckets = calloc(1, bucket_size * new_capacity);
   if (!new_buckets)
     {
       return false;
@@ -563,7 +562,7 @@ HTSizeDown(OPHashTable* table, OPHash hasher)
   table->capacity_ms4b = new_capacity_ms4b;
   table->longest_probes = 0;
   memset(table->stats, 0x00, sizeof(uint32_t) * PROBE_STATS_SIZE);
-  table->bucket_ref = OPPtr2Ref(new_buckets);
+  table->bucket_ref = new_buckets;
 
   for (uint64_t idx = 0; idx < old_capacity; idx++)
     {
@@ -573,7 +572,7 @@ HTSizeDown(OPHashTable* table, OPHash hasher)
                            0, NULL, &resized);
         }
     }
-  OPDealloc(old_buckets);
+  free(old_buckets);
   return true;
 }
 
@@ -678,7 +677,7 @@ HTPreHashSearchIdx(OPHashTable* table, uint64_t hashed_key,
   const size_t keysize = table->keysize;
   const size_t valsize = table->valsize;
   const size_t bucket_size = keysize + valsize + 1;
-  uint8_t* buckets = OPRef2Ptr(table, table->bucket_ref);
+  uint8_t* buckets = table->bucket_ref;
   uintptr_t idx_next;
   uint64_t mask = (1ULL << (64 - table->capacity_clz)) - 1;
   uint64_t probing_key;
@@ -718,7 +717,7 @@ void* HTGetCustom(OPHashTable* table, OPHash hasher, void* key)
   const size_t keysize = table->keysize;
   const size_t valsize = table->valsize;
   const size_t bucket_size = keysize + valsize + 1;
-  uint8_t* buckets = OPRef2Ptr(table, table->bucket_ref);
+  uint8_t* buckets = table->bucket_ref;
   uintptr_t idx;
   if (HTSearchIdx(table, hasher, key, &idx))
     {
@@ -763,7 +762,7 @@ HTPreHashDeleteCustom(OPHashTable* table, OPHash hasher,
   if (!HTPreHashSearchIdx(table, hashed_key, key, &idx))
     return NULL;
 
-  buckets = OPRef2Ptr(table, table->bucket_ref);
+  buckets = table->bucket_ref;
 
   table->objcnt--;
   record_probe = findprobe(table, hasher, idx);
@@ -805,7 +804,7 @@ void HTIterate(OPHashTable* table, OPHashIterator iterator, void* context)
   const size_t keysize = table->keysize;
   const size_t valsize = table->valsize;
   const size_t bucket_size = keysize + valsize + 1;
-  uint8_t* buckets = OPRef2Ptr(table, table->bucket_ref);
+  uint8_t* buckets = table->bucket_ref;
   uint64_t capacity = HTCapacity(table);
 
   for (uint64_t idx = 0; idx < capacity; idx++)
