@@ -235,7 +235,7 @@ static uint64_t q_key_memory(QKey key) {
 
 // Hashes a key using the Thomas Wang's 64-bit mix function.
 static uint64_t q_hash(void *key_generic, size_t size) {
-    uint64_t key = *((uint64_t *) key_generic);
+    uint64_t key = ((QKey *) key_generic)->packed;
     key = (~key) + (key << 21U);
     key = key ^ (key >> 24U);
     key = (key + (key << 3U)) + (key << 8U);
