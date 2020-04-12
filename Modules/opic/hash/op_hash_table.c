@@ -51,8 +51,11 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+
+#include "Python.h"
 #include "../common/op_assert.h"
 #include "../common/op_utils.h"
+
 #include "op_hash_table.h"
 
 #define PROBE_STATS_SIZE 64
@@ -120,13 +123,13 @@ HTNew(uint64_t num_objects, double load,
 
   bucket_size = keysize + valsize + 1;
 
-  table = calloc(1, sizeof(OPHashTable));
+  table = PyMem_Calloc(1, sizeof(OPHashTable));
   if (!table)
     return NULL;
-  bucket_ptr = calloc(1, bucket_size * capacity);
+  bucket_ptr = PyMem_Calloc(1, bucket_size * capacity);
   if (!bucket_ptr)
     {
-      free(table);
+      PyMem_Free(table);
       return NULL;
     }
   table->bucket_ref = bucket_ptr;
@@ -143,8 +146,8 @@ HTNew(uint64_t num_objects, double load,
 void
 HTDestroy(OPHashTable* table)
 {
-  free((void*) table->bucket_ref);
-  free(table);
+  PyMem_Free((void*) table->bucket_ref);
+  PyMem_Free(table);
 }
 
 uint64_t HTObjcnt(OPHashTable* table)
@@ -483,7 +486,7 @@ HTSizeUp(OPHashTable* table, OPHash hasher)
     }
   new_capacity = HTCapacityInternal(new_capacity_clz, new_capacity_ms4b);
 
-  new_buckets = calloc(1, bucket_size * new_capacity);
+  new_buckets = PyMem_Calloc(1, bucket_size * new_capacity);
   if (!new_buckets)
     {
       return false;
@@ -506,7 +509,7 @@ HTSizeUp(OPHashTable* table, OPHash hasher)
                            0, NULL, &resized);
         }
     }
-  free(old_buckets);
+  PyMem_Free(old_buckets);
   return true;
 }
 
@@ -549,7 +552,7 @@ HTSizeDown(OPHashTable* table, OPHash hasher)
     }
 
   new_capacity = HTCapacityInternal(new_capacity_clz, new_capacity_ms4b);
-  new_buckets = calloc(1, bucket_size * new_capacity);
+  new_buckets = PyMem_Calloc(1, bucket_size * new_capacity);
   if (!new_buckets)
     {
       return false;
@@ -572,7 +575,7 @@ HTSizeDown(OPHashTable* table, OPHash hasher)
                            0, NULL, &resized);
         }
     }
-  free(old_buckets);
+  PyMem_Free(old_buckets);
   return true;
 }
 
