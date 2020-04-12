@@ -31,8 +31,10 @@
 #include "frameobject.h"        /* for PyFrame_ClearFreeList */
 #include "pydtrace.h"
 #include "pytime.h"             /* for _PyTime_GetMonotonicClock() */
-#include "hashtable.h"
 #include "stdbool.h"
+
+#include "opic/hash/op_hash.h"
+#include "opic/hash/op_hash_table.h"
 
 /*[clinic input]
 module gc
@@ -178,7 +180,7 @@ static struct QConfig {
 // Struct for Q state.
 static struct QState {
     // The sparse table representing Q-values.
-    _Py_hashtable_t *q_table;
+    OPHashTable *q_table;
     // Replay memory.
     QTransition *replay;
     // The number of entries in the replay memory.
@@ -231,21 +233,17 @@ static uint64_t q_key_memory(QKey key) {
     return key.packed & 0xFFFFU;
 }
 
-// Hashes a key.
-static Py_uhash_t q_hashtable_hash_key(_Py_hashtable_t *ht, const void *pkey) {
-    QKey key;
-    _Py_HASHTABLE_READ_KEY(ht, pkey, key);
-
-    return key.packed;
-}
-
-// Tests the equality of two double pointers.
-static int q_hashtable_compare_value(_Py_hashtable_t *ht, const void *pkey, const _Py_hashtable_entry_t *entry) {
-    double *p1, *p2;
-    _Py_HASHTABLE_READ_KEY(ht, pkey, p1);
-    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, p2);
-
-    return p1 == p2;
+// Hashes a key using the Thomas Wang's 64-bit mix function.
+static uint64_t q_hash(void *key_generic, size_t size) {
+    uint64_t key = *((uint64_t *) key_generic);
+    key = (~key) + (key << 21U);
+    key = key ^ (key >> 24U);
+    key = (key + (key << 3U)) + (key << 8U);
+    key = key ^ (key >> 14U);
+    key = (key + (key << 2U)) + (key << 4U);
+    key = key ^ (key >> 28U);
+    key = key + (key << 31u);
+    return key;
 }
 
 // Seed for random number generator.
@@ -306,34 +304,37 @@ static QObservation q_observation() {
     return observation;
 }
 
-// Gets a Q-value table associated with a replay index.
-static double *q_get_table(uint64_t index) {
+// Gets a pointer to the Q-value table associated with a replay index.
+static uintptr_t *q_get_table_ptr(uint64_t index) {
     // Fetch the entry from the hashtable.
     QObservation observation = q_state.replay[index].observation;
     QKey key = q_create_key(observation.instruction, observation.memory);
-    _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(q_state.q_table, key);
 
-    // Pointer to table.
-    double *table;
+    // Prepare for upsert.
+    uintptr_t *table_ptr;
+    bool is_duplicate;
 
-    // If the entry does not exist, allocate a new table. Otherwise, fetch the existing table.
-    if (entry == NULL) {
-        // All values are initially zero.
-        table = PyMem_Calloc(Q_NUM_ACTIONS, sizeof(double));
-        _Py_HASHTABLE_SET(q_state.q_table, key, table);
+    // Perform upsert.
+    HTUpsertCustom(q_state.q_table, q_hash, &key, (void **) &table_ptr, &is_duplicate);
 
-        // If over memory fence, penalize every state except full collection.
-        if (observation.memory > q_config.fence_memory) {
-            for (int i = 0; i < Q_NUM_ACTIONS - 1; i++) {
-                table[i] -= q_config.fence_penalty;
-            }
+    // If the entry exists, then just return it.
+    if (is_duplicate) {
+        return table_ptr;
+    }
+
+    // Allocate a new table. All values are initially zero.
+    double *table = PyMem_Calloc(Q_NUM_ACTIONS, sizeof(double));
+    *table_ptr = (uintptr_t) table;
+
+    // If over memory fence, penalize every state except full collection.
+    if (observation.memory > q_config.fence_memory) {
+        for (int i = 0; i < Q_NUM_ACTIONS - 1; i++) {
+            table[i] -= q_config.fence_penalty;
         }
-    } else {
-        _Py_HASHTABLE_ENTRY_READ_DATA(q_state.q_table, entry, table);
     }
 
     // Return the pointer to the table.
-    return table;
+    return table_ptr;
 }
 
 // Pushes a frame into reply memory.
@@ -377,14 +378,14 @@ static inline uintptr_t q_tag(uintptr_t ptr, uintptr_t tag) {
 }
 
 // Finds the index of the action associated with the highest value.
-static uint8_t q_max_index(double *output) {
+static uint8_t q_max_index(uintptr_t table_ptr) {
     // Untag the pointer.
-    output = (double *) q_untag((uintptr_t) output);
+    double *table = (double *) q_untag(table_ptr);
 
     // Find the best index.
     uint8_t best_index = 0;
     for (int i = 1; i < Q_NUM_ACTIONS; i++) {
-        if (output[i] > output[best_index]) {
+        if (table[i] > table[best_index]) {
             best_index = i;
         }
     }
@@ -393,25 +394,19 @@ static uint8_t q_max_index(double *output) {
 
 // Evaluates the policy function and returns the index of the best output.
 static uint8_t q_evaluate(uint64_t index) {
-    // Fetch the associated output from the table.
-    double *output = q_get_table(index);
+    // Fetch the associated pointer for the table.
+    uintptr_t *table_ptr = q_get_table_ptr(index);
 
     // If the 3rd to last bit is set, then the decision is cached.
-    if ((uintptr_t) output & 0x4U) {
-        return (uintptr_t) output & 0x3U;
+    if (*table_ptr & 0x4U) {
+        return *table_ptr & 0x3U;
     }
 
     // Find the best index.
-    uint8_t max_index = q_max_index(output);
-
-    // The table must now exist, so fetch it from the hashtable.
-    QObservation observation = q_state.replay[index].observation;
-    QKey key = q_create_key(observation.instruction, observation.memory);
-    _Py_hashtable_entry_t *entry = _Py_HASHTABLE_GET_ENTRY(q_state.q_table, key);
+    uint8_t max_index = q_max_index(*table_ptr);
 
     // Set the best index.
-    uint64_t tagged_ptr = q_tag((uintptr_t) output, 0x4U | max_index);
-    _Py_HASHTABLE_ENTRY_WRITE_DATA(q_state.q_table, entry, tagged_ptr);
+    *table_ptr = q_tag(*table_ptr, 0x4U | max_index);
 
     // Return the best index.
     return max_index;
@@ -454,11 +449,12 @@ static void q_train_index(uint64_t index) {
     double reward = q_state.replay[index].reward;
 
     // Get this table.
-    double *table = q_get_table(index);
+    uintptr_t *table_ptr = q_get_table_ptr(index);
+    double *table = (double *) q_untag(*table_ptr);
 
     // Get future replay and table.
     uint64_t future_index = (index + 1) % q_state.replay_capacity;
-    double *future_table = q_get_table(future_index);
+    double *future_table = (double *) q_untag(*q_get_table_ptr(future_index));
 
     // Estimate the optimal future value.
     uint8_t future_action = q_evaluate(future_index);
@@ -470,38 +466,33 @@ static void q_train_index(uint64_t index) {
 
     // Update Q-value.
     table[action] = y;
+
+    // Clear cache bits.
+    *table_ptr = (uintptr_t) table;
 }
 
 // Frees a hashtable entry.
-static int q_free_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data) {
-    // Read value.
-    double *value;
-    _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
-
+static void q_free_hashtable_entry(void *key_generic, void *value_generic,
+                                   size_t keysize, size_t valsize, void *context) {
     // Free value.
-    PyMem_Free(value);
-    return 0;
+    uintptr_t *value = (uintptr_t *) value_generic;
+    PyMem_Free((void *) q_untag(*value));
 }
 
 // Frees a hashtable entry.
-static int q_print_hashtable_entry(_Py_hashtable_t *ht, _Py_hashtable_entry_t *entry, void *user_data) {
-    // Read key.
-    QKey key;
-    _Py_HASHTABLE_ENTRY_READ_KEY(ht, entry, key);
-
-    // Read value.
-    double *value;
-    _Py_HASHTABLE_ENTRY_READ_DATA(ht, entry, value);
+static void q_print_hashtable_entry(void *key_generic, void *value_generic,
+                                    size_t keysize, size_t valsize, void *context) {
+    // Get the key and value.
+    QKey *key = (QKey *) key_generic;
+    uintptr_t *value = (uintptr_t *) value_generic;
 
     // Find the maximum value.
-    uint8_t action = q_max_index(value);
+    uint8_t action = q_max_index(*value);
 
     // Print key and value if the action is to collect.
     if (action > 0) {
-        printf("(%lu, %lu): %u\n", q_key_instruction(key), q_key_memory(key), action);
+        printf("(%lu, %lu): %u\n", q_key_instruction(*key), q_key_memory(*key), action);
     }
-
-    return 0;
 }
 
 // Method to determine which generation to collect, or -1 for no collection.
@@ -595,8 +586,7 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     q_seed_rand();
 
     // Initialize Q state.
-    q_state.q_table = _Py_hashtable_new(sizeof(QKey), sizeof(double *),
-                                        q_hashtable_hash_key, q_hashtable_compare_value);
+    q_state.q_table = HTNew(1000, 0.89, sizeof(QKey), sizeof(uintptr_t));
     q_state.replay_capacity = q_config.replay_size / sizeof(QTransition);
     q_state.replay_index = 0;
     q_state.last_replay_index = 0;
@@ -2488,18 +2478,18 @@ _PyGC_Fini(_PyRuntimeState *runtime)
     Py_CLEAR(state->callbacks);
 
     // Print metadata.
-    _Py_hashtable_foreach(q_state.q_table, q_print_hashtable_entry, NULL);
+    HTIterate(q_state.q_table, q_print_hashtable_entry, NULL);
 
     // Print aggregate table statistics.
-    if (q_state.q_table->entries > 0) {
-        printf("Total entries: %lu\n", q_state.q_table->entries);
+    if (HTObjcnt(q_state.q_table) > 0) {
+        printf("Total entries: %lu\n", HTObjcnt(q_state.q_table));
     }
 
     // Cleanup table.
-    _Py_hashtable_foreach(q_state.q_table, q_free_hashtable_entry, NULL);
+    HTIterate(q_state.q_table, q_free_hashtable_entry, NULL);
 
     // Cleanup Q state.
-    _Py_hashtable_destroy(q_state.q_table);
+    HTDestroy(q_state.q_table);
     PyMem_Free(q_state.replay);
 }
 

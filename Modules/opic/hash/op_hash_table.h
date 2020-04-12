@@ -54,17 +54,6 @@ OP_BEGIN_DECLS
 typedef struct OPHashTable OPHashTable;
 
 /**
- * @ingroup hash
- * @struct HTFunnel
- * @brief An opaque object for doing massive update or quries on
- * OPHashTable.
- *
- * This object is not thread safe.
- *
- */
-typedef struct HTFunnel HTFunnel;
-
-/**
  * @relates OPHashTable
  * @brief Constructor for OPHashTable.
  *
