@@ -199,6 +199,12 @@ static struct QState {
     bool enabled;
     // Whether we've issued a warning about the replay table.
     bool did_warn;
+    // The training thread ID.
+    pthread_t tid;
+    // Argument to training thread.
+    double arg_reward;
+    // Whether the replay table is locked.
+    bool replay_locked;
 } q_state;
 
 // Key for Q-table.
@@ -242,7 +248,7 @@ static uint64_t q_hash(void *key_generic, size_t size) {
     key = key ^ (key >> 14U);
     key = (key + (key << 2U)) + (key << 4U);
     key = key ^ (key >> 28U);
-    key = key + (key << 31u);
+    key = key + (key << 31U);
     return key;
 }
 
@@ -310,28 +316,41 @@ static uintptr_t *q_get_table_ptr(uint64_t index) {
     QObservation observation = q_state.replay[index].observation;
     QKey key = q_create_key(observation.instruction, observation.memory);
 
-    // Prepare for upsert.
-    uintptr_t *table_ptr;
+    // It is more efficient to use an upsert here, but we have to get and then upsert because insertion requires a lock
+    // on the hashtable. The hope is that we don't have to do this very often, and once the hashtable is initialized,
+    // there is not really a need to acquire and release locks.
+    uintptr_t *table_ptr = HTGetCustom(q_state.q_table, q_hash, &key);
+
+    // If the key does exist, we are done.
+    if (table_ptr != NULL) {
+        return table_ptr;
+    }
+
+    // We must acquire GIL to perform upsert.
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    // Variable to check whether the entry exists.
     bool is_duplicate;
 
     // Perform upsert.
     HTUpsertCustom(q_state.q_table, q_hash, &key, (void **) &table_ptr, &is_duplicate);
 
-    // If the entry exists, then just return it.
-    if (is_duplicate) {
-        return table_ptr;
-    }
+    // If the entry does not exist, then create it.
+    if (!is_duplicate) {
+        // Allocate a new table. All values are initially zero.
+        double *table = PyMem_RawCalloc(Q_NUM_ACTIONS, sizeof(double));
+        *table_ptr = (uintptr_t) table;
 
-    // Allocate a new table. All values are initially zero.
-    double *table = PyMem_Calloc(Q_NUM_ACTIONS, sizeof(double));
-    *table_ptr = (uintptr_t) table;
-
-    // If over memory fence, penalize every state except full collection.
-    if (observation.memory > q_config.fence_memory) {
-        for (int i = 0; i < Q_NUM_ACTIONS - 1; i++) {
-            table[i] -= q_config.fence_penalty;
+        // If over memory fence, penalize every state except full collection.
+        if (observation.memory > q_config.fence_memory) {
+            for (int i = 0; i < Q_NUM_ACTIONS - 1; i++) {
+                table[i] -= q_config.fence_penalty;
+            }
         }
     }
+
+    // Release GIL. Table modifications are done.
+    PyGILState_Release(gstate);
 
     // Return the pointer to the table.
     return table_ptr;
@@ -346,25 +365,19 @@ static void q_replay_push(QObservation *observation) {
     transition.action = 0;
 
     // Store into replay memory.
-    uint64_t index = q_state.replay_index++ % q_state.replay_capacity;
+    uint64_t index = q_state.replay_index % q_state.replay_capacity;
     q_state.replay[index] = transition;
-}
 
-// The previous replay associated with a given index.
-static QTransition *q_previous_replay(uint64_t index) {
-    uint64_t previous_index = (index - 1) % q_state.replay_capacity;
-    return &(q_state.replay[previous_index]);
+    // If the replay table is not locked, increment the replay index.
+    if (!q_state.replay_locked) {
+        q_state.replay_index++;
+    }
 }
-
-//// The next replay associated with a given index.
-//static QTransition *q_next_replay(uint64_t index) {
-//    uint64_t next_index = (index + 1) % q_state.replay_capacity;
-//    return &(q_state.replay[next_index]);
-//}
 
 // Gets the last frame in the replay memory.
 static QTransition *q_last_replay() {
-    return q_previous_replay(q_state.replay_index);
+    uint64_t previous_index = (q_state.replay_index - !q_state.replay_locked) % q_state.replay_capacity;
+    return &(q_state.replay[previous_index]);
 }
 
 // Untag pointer.
@@ -421,7 +434,7 @@ static uint8_t q_select_action() {
     // Determine if we should use the model or choose a random action.
     if (q_rand_float() > eps_threshold) {
         // Evaluate using model and find maximum.
-        return q_evaluate((q_state.replay_index - 1) % q_state.replay_capacity);
+        return q_evaluate((q_state.replay_index - !q_state.replay_locked) % q_state.replay_capacity);
     } else {
         // Indicate that a random action was chose.
         q_state.random_actions++;
@@ -434,7 +447,7 @@ static uint8_t q_select_action() {
             return 0;
         } else if (r >= 1.0 / 2000.0) {
             return 1;
-        } else if (r >= 1.0 / 10000.0) {
+        } else if (r >= 1.0 / 5000.0) {
             return 2;
         } else {
             return 3;
@@ -476,7 +489,7 @@ static void q_free_hashtable_entry(void *key_generic, void *value_generic,
                                    size_t keysize, size_t valsize, void *context) {
     // Free value.
     uintptr_t *value = (uintptr_t *) value_generic;
-    PyMem_Free((void *) q_untag(*value));
+    PyMem_RawFree((void *) q_untag(*value));
 }
 
 // Frees a hashtable entry.
@@ -505,9 +518,12 @@ learning_predict(struct _gc_runtime_state *state) {
             return -1;
         }
 
-        // Get the action and store to replay.
+        // Store the observation and select an action.
+        // Store to replay if the replay is not locked.
         QObservation observation = q_observation();
         q_replay_push(&observation);
+
+        // Select an action.
         uint8_t action = q_select_action();
         q_last_replay()->action = action;
 
@@ -532,6 +548,62 @@ learning_predict(struct _gc_runtime_state *state) {
 
     // The first generation should be collected.
     return 0;
+}
+
+// Performs training for a given reward.
+static void *q_train(void *_) {
+    // Get the reward.
+    double reward = q_state.arg_reward;
+
+    // Increase evaluations for epsilon-greedy strategy.
+    q_state.evaluations++;
+
+    // Check whether we exceeded the size of the replay table.
+    if (q_state.replay_index - q_state.last_replay_index >= q_state.replay_capacity) {
+        // Warn about exceeding the replay table size.
+        if (!q_state.did_warn) {
+            q_state.did_warn = true;
+            printf("Please increase the size of the replay table.\n");
+        }
+
+        // Apply reward to everything in the replay table.
+        for (uint64_t i = 0; i < q_state.replay_capacity; i++) {
+            q_state.replay[i].reward += reward;
+        }
+
+        // Do training on everything in the replay table backwards.
+        for (uint64_t i = q_state.replay_index; i != q_state.replay_index - q_state.replay_capacity; i--) {
+            q_train_index(i % q_state.replay_capacity);
+        }
+    } else {
+        // Apply reward to new observations.
+        for (uint64_t i = q_state.last_replay_index; i < q_state.replay_index; i++) {
+            q_state.replay[i % q_state.replay_capacity].reward += reward;
+        }
+
+        // Try to find what the ending index is. We want to train on one before the last replay index if possible.
+        uint64_t end = (q_state.last_replay_index == 0)
+                       ? q_state.last_replay_index - 1
+                       : q_state.last_replay_index - 2;
+
+        // Do some training. The replay index is one after the last entry. We start at two before the replay index,
+        // which is the second to last entry and therefore has a next entry for future value computation.
+        for (uint64_t i = q_state.replay_index - 2; i != end; i--) {
+            q_train_index(i % q_state.replay_capacity);
+        }
+    }
+
+    // Set last replay index.
+    q_state.last_replay_index = q_state.replay_index;
+
+
+    // We should acquire GIL before unlocking the table so that it is not in the middle of an instruction.
+    PyGILState_STATE gstate = PyGILState_Ensure();
+    q_state.replay_locked = false;
+    PyGILState_Release(gstate);
+
+    // Return nothing.
+    return NULL;
 }
 
 /*** End Q functions. ***/
@@ -576,7 +648,7 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     q_config.epsilon_end = (q_epsilon_end != NULL) ? atof(q_epsilon_end) : 0.01;
     q_config.epsilon_decay = (q_epsilon_decay != NULL) ? atof(q_epsilon_decay) : 10.0;
     q_config.gamma = (q_gamma != NULL) ? atof(q_gamma) : 0.9999;
-    q_config.skip = (q_skip != NULL) ? (uint64_t) atoll(q_skip) : 10ULL;
+    q_config.skip = (q_skip != NULL) ? (uint64_t) atoll(q_skip) : 16ULL;
     q_config.max_memory = (q_max_memory != NULL) ? (uint64_t) atoll(q_max_memory) : (256ULL << 20U);
     q_config.fence_memory = (q_fence_memory != NULL) ? (uint64_t) atoll(q_fence_memory) : q_config.max_memory;
     q_config.fence_penalty = (q_fence_penalty != NULL) ? atof(q_fence_penalty) : 1.0;
@@ -590,12 +662,13 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     q_state.replay_capacity = q_config.replay_size / sizeof(QTransition);
     q_state.replay_index = 0;
     q_state.last_replay_index = 0;
-    q_state.replay = PyMem_Malloc(q_state.replay_capacity * sizeof(QTransition));
+    q_state.replay = PyMem_RawMalloc(q_state.replay_capacity * sizeof(QTransition));
     q_state.evaluations = 0;
     q_state.objects = 0;
     q_state.random_actions = 0;
     q_state.enabled = false;
     q_state.did_warn = false;
+    q_state.replay_locked = false;
 }
 
 /*
@@ -2207,46 +2280,20 @@ gc_reward_impl(PyObject *module, double value)
         printf("Saw %lu sites.\n", (q_state.replay_index - q_state.last_replay_index));
     }
 
-    // Increase evaluations for epsilon-greedy strategy.
-    q_state.evaluations++;
+    // Create thread if training is not already ongoing.
+    if (!q_state.replay_locked) {
+        // Lock the replay table.
+        q_state.replay_locked = true;
 
-    // Check whether we exceeded the size of the replay table.
-    if (q_state.replay_index - q_state.last_replay_index >= q_state.replay_capacity) {
-        // Warn about exceeding the replay table size.
-        if (!q_state.did_warn) {
-            q_state.did_warn = true;
-            printf("Please increase the size of the replay table.\n");
-        }
+        // Join the previous running thread if it exists.
+        pthread_join(q_state.tid, NULL);
 
-        // Apply reward to everything in the replay table.
-        for (uint64_t i = 0; i < q_state.replay_capacity; i++) {
-            q_state.replay[i].reward += value;
-        }
+        // Pass in argument.
+        q_state.arg_reward = value;
 
-        // Do training on everything in the replay table backwards.
-        for (uint64_t i = q_state.replay_index; i != q_state.replay_index - q_state.replay_capacity; i--) {
-            q_train_index(i % q_state.replay_capacity);
-        }
-    } else {
-        // Apply reward to new observations.
-        for (uint64_t i = q_state.last_replay_index; i < q_state.replay_index; i++) {
-            q_state.replay[i % q_state.replay_capacity].reward += value;
-        }
-
-        // Try to find what the ending index is. We want to train on one before the last replay index if possible.
-        uint64_t end = (q_state.last_replay_index == 0)
-                       ? q_state.last_replay_index - 1
-                       : q_state.last_replay_index - 2;
-
-        // Do some training. The replay index is one after the last entry. We start at two before the replay index,
-        // which is the second to last entry and therefore has a next entry for future value computation.
-        for (uint64_t i = q_state.replay_index - 2; i != end; i--) {
-            q_train_index(i % q_state.replay_capacity);
-        }
+        // Start training thread.
+        pthread_create(&q_state.tid, NULL, q_train, NULL);
     }
-
-    // Set last replay index.
-    q_state.last_replay_index = q_state.replay_index;
 
     // Return none.
     Py_RETURN_NONE;
@@ -2477,6 +2524,9 @@ _PyGC_Fini(_PyRuntimeState *runtime)
     Py_CLEAR(state->garbage);
     Py_CLEAR(state->callbacks);
 
+    // Join training thread.
+    pthread_join(q_state.tid, NULL);
+
     // Print metadata.
     HTIterate(q_state.q_table, q_print_hashtable_entry, NULL);
 
@@ -2490,7 +2540,7 @@ _PyGC_Fini(_PyRuntimeState *runtime)
 
     // Cleanup Q state.
     HTDestroy(q_state.q_table);
-    PyMem_Free(q_state.replay);
+    PyMem_RawFree(q_state.replay);
 }
 
 /* for debugging */
@@ -2555,11 +2605,14 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
 
         // Perform collection if necessary.
         if (generation != -1) {
+            // Track time of collection.
             _PyTime_t t1 = _PyTime_GetMonotonicClock();
             _PyRuntime.gc.collecting = 1;
             collect_with_callback(state, generation);
             _PyRuntime.gc.collecting = 0;
             _PyTime_t t2 = _PyTime_GetMonotonicClock();
+
+            // If there is some entry in the replay history, apply reward shaping.
             if (q_state.replay_index > 0) {
                 q_last_replay()->reward -= _PyTime_AsSecondsDouble(t2 - t1) / 100;
             }

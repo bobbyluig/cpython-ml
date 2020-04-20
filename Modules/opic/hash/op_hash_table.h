@@ -29,7 +29,6 @@
 #include <stdbool.h>
 #include "../common/op_macros.h"
 #include "op_hash.h"
-
 OP_BEGIN_DECLS
 
 /**
@@ -66,7 +65,7 @@ typedef struct OPHashTable OPHashTable;
  * can be zero and the hash table would work like a hash set.
  * @return OPHashTable instance if allocation succeeded, else return NULL.
  */
-OPHashTable* HTNew(uint64_t num_objects,
+OPHashTable *HTNew(uint64_t num_objects,
                    double load, size_t keysize, size_t valsize);
 
 /**
@@ -75,7 +74,7 @@ OPHashTable* HTNew(uint64_t num_objects,
  *
  * @param table the OPHashTable instance to destory.
  */
-void HTDestroy(OPHashTable* table);
+void HTDestroy(OPHashTable *table);
 
 /**
  * @relates OPHashTable
@@ -96,7 +95,7 @@ void HTDestroy(OPHashTable* table);
  * the hash table will resized with a larger capacity. If the resize failed,
  * false is returned.
  */
-bool HTInsertCustom(OPHashTable* table, OPHash hasher, void* key, void* val);
+bool HTInsertCustom(OPHashTable *table, OPHash hasher, void *key, void *val);
 
 /**
  * @relates OPHashTable
@@ -134,8 +133,8 @@ bool HTInsertCustom(OPHashTable* table, OPHash hasher, void* key, void* val);
  * the hash table will resized with a larger capacity. If the resize failed,
  * false is returned.
  */
-bool HTUpsertCustom(OPHashTable* table, OPHash hasher,
-                    void* key, void** val_ref, bool* is_duplicate);
+bool HTUpsertCustom(OPHashTable *table, OPHash hasher,
+                    void *key, void **val_ref, bool *is_duplicate);
 
 /**
  * @relates OPHashTable
@@ -151,7 +150,7 @@ bool HTUpsertCustom(OPHashTable* table, OPHash hasher,
  * to where it would store the value. User can still use the returned value to
  * exam if the key were present in the hash table.
  */
-void* HTGetCustom(OPHashTable* table, OPHash hasher, void* key);
+void *HTGetCustom(OPHashTable *table, OPHash hasher, void *key);
 
 /**
  * @relates OPHashTable
@@ -164,7 +163,7 @@ void* HTGetCustom(OPHashTable* table, OPHash hasher, void* key);
  *
  * The hash table may shrink if too many entries were deleted.
  */
-void* HTDeleteCustom(OPHashTable* table, OPHash hasher, void* key);
+void *HTDeleteCustom(OPHashTable *table, OPHash hasher, void *key);
 
 /**
  * @relates OPHashTable
@@ -185,9 +184,8 @@ void* HTDeleteCustom(OPHashTable* table, OPHash hasher, void* key);
  * false is returned.
  */
 static inline bool
-HTInsert(OPHashTable* table, void* key, void* val)
-{
-  return HTInsertCustom(table, OPDefaultHash, key, val);
+HTInsert(OPHashTable *table, void *key, void *val) {
+    return HTInsertCustom(table, OPDefaultHash, key, val);
 }
 
 /**
@@ -226,9 +224,8 @@ HTInsert(OPHashTable* table, void* key, void* val)
  * false is returned.
  */
 static inline bool
-HTUpsert(OPHashTable* table, void* key, void** val_ref, bool* is_duplicate)
-{
-  return HTUpsertCustom(table, OPDefaultHash, key, val_ref, is_duplicate);
+HTUpsert(OPHashTable *table, void *key, void **val_ref, bool *is_duplicate) {
+    return HTUpsertCustom(table, OPDefaultHash, key, val_ref, is_duplicate);
 }
 
 /**
@@ -244,10 +241,9 @@ HTUpsert(OPHashTable* table, void* key, void** val_ref, bool* is_duplicate)
  * to where it would store the value. User can still use the returned value to
  * exam if the key were present in the hash table.
  */
-static inline void*
-HTGet(OPHashTable* table, void* key)
-{
-  return HTGetCustom(table, OPDefaultHash, key);
+static inline void *
+HTGet(OPHashTable *table, void *key) {
+    return HTGetCustom(table, OPDefaultHash, key);
 }
 
 /**
@@ -261,35 +257,34 @@ HTGet(OPHashTable* table, void* key)
  *
  * The hash table may shrink if too many entries were deleted.
  */
-static inline void*
-HTDelete(OPHashTable* table, void* key)
-{
-  return HTDeleteCustom(table, OPDefaultHash, key);
+static inline void *
+HTDelete(OPHashTable *table, void *key) {
+    return HTDeleteCustom(table, OPDefaultHash, key);
 }
 
 /**
  * @relates OPHashTable
  * @brief Obtain the number of objects stored in this hash table.
  */
-uint64_t HTObjcnt(OPHashTable* table);
+uint64_t HTObjcnt(OPHashTable *table);
 
 /**
  * @relates OPHashTable
  * @brief Obtain the number of objects can be stored in this hash table.
  */
-uint64_t HTCapacity(OPHashTable* table);
+uint64_t HTCapacity(OPHashTable *table);
 
 /**
  * @relates OPHashTable
  * @brief Obtain the size of the key configured for this hash table.
  */
-size_t HTKeySize(OPHashTable* table);
+size_t HTKeySize(OPHashTable *table);
 
 /**
  * @relates OPHashTable
  * @brief Obtain the size of the value configured for this hash table.
  */
-size_t HTValSize(OPHashTable* table);
+size_t HTValSize(OPHashTable *table);
 
 /**
  * @relates OPHashTable
@@ -321,7 +316,7 @@ size_t HTValSize(OPHashTable* table);
  * HTIterate(table, &my_iterator, &my_s);
  * @endcode
  */
-void HTIterate(OPHashTable* table, OPHashIterator iterator, void* context);
+void HTIterate(OPHashTable *table, OPHashIterator iterator, void *context);
 
 /**
  * @relates OPHashTable
@@ -329,21 +324,18 @@ void HTIterate(OPHashTable* table, OPHashIterator iterator, void* context);
  *
  * Deprecated. Use HTProbeStat instead.
  */
-void HTPrintStat(OPHashTable* table);
+void HTPrintStat(OPHashTable *table);
 
-uint32_t HTMaxProbe(OPHashTable* table);
+uint32_t HTMaxProbe(OPHashTable *table);
 
-uint32_t HTProbeStat(OPHashTable* table, uint32_t idx);
+uint32_t HTProbeStat(OPHashTable *table, uint32_t idx);
 
-int HTGetProbeCustom(OPHashTable* table, OPHash hasher, void* key);
+int HTGetProbeCustom(OPHashTable *table, OPHash hasher, void *key);
 
 static inline
-int HTGetProbe(OPHashTable* table, void* key)
-{
-  return HTGetProbeCustom(table, OPDefaultHash, key);
-}
-
-OP_END_DECLS
+int HTGetProbe(OPHashTable *table, void *key) {
+    return HTGetProbeCustom(table, OPDefaultHash, key);
+}OP_END_DECLS
 
 #endif
 
