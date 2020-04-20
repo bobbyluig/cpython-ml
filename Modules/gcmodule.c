@@ -2529,8 +2529,10 @@ _PyGC_Fini(_PyRuntimeState *runtime)
     Py_CLEAR(state->garbage);
     Py_CLEAR(state->callbacks);
 
-    // Join training thread.
+    // Join training thread by release GIL, waiting, then reacquiring.
+    PyGILState_Release(PyGILState_Ensure());
     pthread_join(q_state.tid, NULL);
+    PyGILState_Ensure();
 
     // Print metadata.
     HTIterate(q_state.q_table, q_print_hashtable_entry, NULL);
