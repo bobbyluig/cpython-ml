@@ -397,7 +397,7 @@ static QTransition *q_last_replay() {
 }
 
 // Finds the index of the action associated with the highest value.
-static uint8_t q_max_index(double *table) {
+static uint8_t q_max_index(const double *table) {
     // Find the best index.
     uint8_t best_index = 0;
     for (int i = 1; i < Q_NUM_ACTIONS; i++) {

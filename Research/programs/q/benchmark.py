@@ -65,13 +65,13 @@ def collect(operation, reward):
     # Zero time.
     zero_time = None
 
+    # Get the starting time.
+    start = time.time()
+
     # Main measurement loop.
     while True:
         # Get the starting random actions.
         random_start = gc.random_actions()
-
-        # Get the starting time.
-        start = time.time()
 
         # Perform operation with GC.
         gc.enable()
@@ -81,6 +81,9 @@ def collect(operation, reward):
         # Compute the delta of time.
         current_time = time.time()
         delta_time = current_time - start
+
+        # Get the starting time.
+        start = time.time()
 
         # Compute memory usage.
         memory = gc.memory_usage()
