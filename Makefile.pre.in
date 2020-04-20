@@ -275,7 +275,9 @@ MODULE_OBJS=	\
 		Modules/config.o \
 		Modules/getpath.o \
 		Modules/main.o \
-		Modules/gcmodule.o
+		Modules/gcmodule.o \
+		Modules/opic/hash/cityhash.o \
+        Modules/opic/hash/op_hash_table.o
 
 IO_H=		Modules/_io/_iomodule.h
 

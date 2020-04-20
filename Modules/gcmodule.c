@@ -292,6 +292,16 @@ static double q_rand_float() {
 //    return (rand() % (end - start)) + start;
 //}
 
+// Untag pointer.
+static inline uintptr_t q_untag(uintptr_t ptr) {
+    return ptr & ~0x7ULL;
+}
+
+// Tag pointer.
+static inline uintptr_t q_tag(uintptr_t ptr, uintptr_t tag) {
+    return q_untag(ptr) | (tag & 0x7ULL);
+}
+
 // Takes an observation.
 static QObservation q_observation() {
     QObservation observation;
@@ -310,9 +320,11 @@ static QObservation q_observation() {
     return observation;
 }
 
-// Gets a pointer to the Q-value table associated with a replay index.
+// Gets a pointer to the Q-value table associated with a replay index, creating the table as necessary if it does not
+// exist and populates it with the correct initial values. This method should only be called by the training thread and
+// not by any evaluation threads.
 static uintptr_t *q_get_table_ptr(uint64_t index) {
-    // Fetch the entry from the hashtable.
+    // Fetch the key.
     QObservation observation = q_state.replay[index].observation;
     QKey key = q_create_key(observation.instruction, observation.memory);
 
@@ -326,30 +338,34 @@ static uintptr_t *q_get_table_ptr(uint64_t index) {
         return table_ptr;
     }
 
-    // We must acquire GIL to perform upsert.
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    // Allocate a new table. All values are initially zero.
+    double *table = PyMem_RawCalloc(Q_NUM_ACTIONS, sizeof(double));
 
-    // Variable to check whether the entry exists.
-    bool is_duplicate;
+    // Define the tag (best policy index).
+    uint8_t tag = 0;
 
-    // Perform upsert.
-    HTUpsertCustom(q_state.q_table, q_hash, &key, (void **) &table_ptr, &is_duplicate);
+    // If over memory fence, penalize every state except full collection.
+    if (observation.memory > q_config.fence_memory) {
+        // Apply penalty.
+        for (int i = 0; i < Q_NUM_ACTIONS - 1; i++) {
+            table[i] -= q_config.fence_penalty;
+        }
 
-    // If the entry does not exist, then create it.
-    if (!is_duplicate) {
-        // Allocate a new table. All values are initially zero.
-        double *table = PyMem_RawCalloc(Q_NUM_ACTIONS, sizeof(double));
-        *table_ptr = (uintptr_t) table;
-
-        // If over memory fence, penalize every state except full collection.
-        if (observation.memory > q_config.fence_memory) {
-            for (int i = 0; i < Q_NUM_ACTIONS - 1; i++) {
-                table[i] -= q_config.fence_penalty;
-            }
+        // The best index is to do full collection if there is any penalty.
+        if (q_config.fence_penalty > 0) {
+            tag = Q_NUM_ACTIONS - 1;
         }
     }
 
-    // Release GIL. Table modifications are done.
+    // Acquire GIL to perform upsert.
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    // Do upsert, ignoring duplicate flag.
+    bool is_duplicate;
+    HTUpsertCustom(q_state.q_table, q_hash, &key, (void **) &table_ptr, &is_duplicate);
+    *table_ptr = q_tag((uintptr_t) table, tag);
+
+    // Release GIL whe insertion is complete.
     PyGILState_Release(gstate);
 
     // Return the pointer to the table.
@@ -380,21 +396,8 @@ static QTransition *q_last_replay() {
     return &(q_state.replay[previous_index]);
 }
 
-// Untag pointer.
-static inline uintptr_t q_untag(uintptr_t ptr) {
-    return ptr & ~0x7ULL;
-}
-
-// Tag pointer.
-static inline uintptr_t q_tag(uintptr_t ptr, uintptr_t tag) {
-    return q_untag(ptr) | (tag & 0x7ULL);
-}
-
 // Finds the index of the action associated with the highest value.
-static uint8_t q_max_index(uintptr_t table_ptr) {
-    // Untag the pointer.
-    double *table = (double *) q_untag(table_ptr);
-
+static uint8_t q_max_index(double *table) {
     // Find the best index.
     uint8_t best_index = 0;
     for (int i = 1; i < Q_NUM_ACTIONS; i++) {
@@ -405,24 +408,26 @@ static uint8_t q_max_index(uintptr_t table_ptr) {
     return best_index;
 }
 
-// Evaluates the policy function and returns the index of the best output.
+// Evaluates the policy function and returns the index of the best output. In the case that there are no entries in the
+// Q-table corresponding to the state, then the index of the best value under the default policy is returned.
 static uint8_t q_evaluate(uint64_t index) {
-    // Fetch the associated pointer for the table.
-    uintptr_t *table_ptr = q_get_table_ptr(index);
+    // Fetch the entry from the hashtable.
+    QObservation observation = q_state.replay[index].observation;
+    QKey key = q_create_key(observation.instruction, observation.memory);
+    uintptr_t *table_ptr = HTGetCustom(q_state.q_table, q_hash, &key);
 
-    // If the 3rd to last bit is set, then the decision is cached.
-    if (*table_ptr & 0x4U) {
+    // If the value exists, extract from the bottom two bits.
+    if (table_ptr != NULL) {
         return *table_ptr & 0x3U;
     }
 
-    // Find the best index.
-    uint8_t max_index = q_max_index(*table_ptr);
-
-    // Set the best index.
-    *table_ptr = q_tag(*table_ptr, 0x4U | max_index);
-
-    // Return the best index.
-    return max_index;
+    // The value doesn't exist. Therefore, the default policy is to do full collection if we are above the memory
+    // threshold. Otherwise, do no collection.
+    if (observation.memory > q_config.fence_memory) {
+        return Q_NUM_ACTIONS - 1;
+    } else {
+        return 0;
+    }
 }
 
 // Selects an action based. Assumes the last observation is in the replay history.
@@ -465,12 +470,13 @@ static void q_train_index(uint64_t index) {
     uintptr_t *table_ptr = q_get_table_ptr(index);
     double *table = (double *) q_untag(*table_ptr);
 
-    // Get future replay and table.
+    // Get future replay index and table.
     uint64_t future_index = (index + 1) % q_state.replay_capacity;
-    double *future_table = (double *) q_untag(*q_get_table_ptr(future_index));
+    uintptr_t future_table_ptr = *q_get_table_ptr(future_index);
+    double *future_table = (double *) q_untag(future_table_ptr);
 
-    // Estimate the optimal future value.
-    uint8_t future_action = q_evaluate(future_index);
+    // Estimate the optimal future value. This value must exist in the table.
+    uint8_t future_action = future_table_ptr & 0x3U;
     double q_future = future_table[future_action];
 
     // Compute desired quality value.
@@ -480,8 +486,8 @@ static void q_train_index(uint64_t index) {
     // Update Q-value.
     table[action] = y;
 
-    // Clear cache bits.
-    *table_ptr = (uintptr_t) table;
+    // Set the tag bits and store into the hashtable.
+    *table_ptr = q_tag((uintptr_t) table, q_max_index(table));
 }
 
 // Frees a hashtable entry.
@@ -500,7 +506,7 @@ static void q_print_hashtable_entry(void *key_generic, void *value_generic,
     uintptr_t *value = (uintptr_t *) value_generic;
 
     // Find the maximum value.
-    uint8_t action = q_max_index(*value);
+    uint8_t action = q_max_index((double *) q_untag(*value));
 
     // Print key and value if the action is to collect.
     if (action > 0) {
@@ -595,7 +601,6 @@ static void *q_train(void *_) {
 
     // Set last replay index.
     q_state.last_replay_index = q_state.replay_index;
-
 
     // We should acquire GIL before unlocking the table so that it is not in the middle of an instruction.
     PyGILState_STATE gstate = PyGILState_Ensure();
