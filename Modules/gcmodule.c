@@ -421,9 +421,9 @@ static uint8_t q_evaluate(uint64_t index) {
 }
 
 // Thresholds for random actions.
-#define THRESHOLD_0 (1.0 / 1000.0)
-#define THRESHOLD_1 (1.0 / 2000.0)
-#define THRESHOLD_2 (1.0 / 5000.0)
+#define THRESHOLD_0 (1.0 / 100.0)
+#define THRESHOLD_1 (1.0 / 200.0)
+#define THRESHOLD_2 (1.0 / 500.0)
 
 // Selects an action based on epsilon-greedy strategy.
 static uint8_t q_select_action(uint8_t policy_action) {
