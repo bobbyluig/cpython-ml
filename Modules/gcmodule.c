@@ -36,6 +36,8 @@
 #include "opic/hash/op_hash.h"
 #include "opic/hash/op_hash_table.h"
 
+#include <sys/random.h>
+
 /*[clinic input]
 module gc
 [clinic start generated code]*/
@@ -253,44 +255,32 @@ static uint64_t q_hash(void *key_generic, size_t size) {
 }
 
 // Seed for random number generator.
-uint32_t q_x, q_y, q_z;
+static uint64_t q_seed[4];
+
+// The rotl function used for xoshiro256++.
+static inline uint64_t q_rotl(const uint64_t x, unsigned int k) {
+    return (x << k) | (x >> (64U - k));
+}
+
+// Generate a random 64-bit integer using xoshiro256++.
+static uint64_t q_rand() {
+    const uint64_t result = q_rotl(q_seed[0] + q_seed[3], 23) + q_seed[0];
+
+    q_seed[2] ^= q_seed[0];
+    q_seed[3] ^= q_seed[1];
+    q_seed[1] ^= q_seed[2];
+    q_seed[0] ^= q_seed[3];
+    q_seed[2] ^= q_seed[1] << 17U;
+    q_seed[3] = q_rotl(q_seed[3], 45U);
+
+    return result;
+}
 
 // Seed the random number generator.
 void q_seed_rand() {
-    // Seed rand() RNG.
-    srand(time(NULL));
-
-    // Get initial numbers.
-    q_x = rand();
-    q_y = rand();
-    q_z = rand();
+    // Use a syscall.
+    getrandom(&q_seed, sizeof(q_seed), 0);
 }
-
-// Generate a random number.
-uint32_t q_rand() {
-    uint32_t t;
-    
-    q_x ^= q_x << 16U;
-    q_x ^= q_x >> 5U;
-    q_x ^= q_x << 1U;
-
-    t = q_x;
-    q_x = q_y;
-    q_y = q_z;
-    q_z = t ^ q_x ^ q_y;
-
-    return q_z;
-}
-
-// Returns a random float in [0, 1).
-static double q_rand_float() {
-    return ((double) q_rand() / ((double) 0xFFFFFFFF + 1));
-}
-
-//// Returns a random integer within the exclusive range [start, end).
-//static uint64_t q_rand_int(uint64_t start, uint64_t end) {
-//    return (rand() % (end - start)) + start;
-//}
 
 // Untag pointer.
 static inline uintptr_t q_untag(uintptr_t ptr) {
@@ -385,13 +375,13 @@ static void q_replay_push(QObservation *observation) {
     q_state.replay[index] = transition;
 
     // If the replay table is not locked, increment the replay index.
-    if (!q_state.replay_locked) {
-        q_state.replay_index++;
-    }
+    q_state.replay_index += !q_state.replay_locked;
 }
 
-// Gets the last frame in the replay memory.
+// Gets the last frame in the replay memory. This method should only be called after a call to push an observation.
 static QTransition *q_last_replay() {
+    // When the replay is locked, then the training thread is running. The replay index does not change, and therefore
+    // the previous index is just the replay index.
     uint64_t previous_index = (q_state.replay_index - !q_state.replay_locked) % q_state.replay_capacity;
     return &(q_state.replay[previous_index]);
 }
@@ -430,37 +420,38 @@ static uint8_t q_evaluate(uint64_t index) {
     }
 }
 
-// Selects an action based. Assumes the last observation is in the replay history.
-static uint8_t q_select_action() {
+// Thresholds for random actions.
+#define THRESHOLD_0 (1.0 / 1000.0)
+#define THRESHOLD_1 (1.0 / 2000.0)
+#define THRESHOLD_2 (1.0 / 5000.0)
+
+// Selects an action based on epsilon-greedy strategy.
+static uint8_t q_select_action(uint8_t policy_action) {
     // Compute threshold.
     double eps_threshold = q_config.epsilon_end + (q_config.epsilon_start - q_config.epsilon_end)
                                                   * exp(-1.0 * q_state.evaluations / q_config.epsilon_decay);
 
-    // Determine if we should use the model or choose a random action.
-    if (q_rand_float() > eps_threshold) {
-        // Evaluate using model and find maximum.
-        return q_evaluate((q_state.replay_index - !q_state.replay_locked) % q_state.replay_capacity);
+    // Determine if we should just use the policy action instead of a random action.
+    if (q_rand() > eps_threshold * UINT64_MAX) {
+        return policy_action;
+    }
+
+    // Generate another random number to determine which action to choose.
+    uint64_t r = q_rand();
+
+    // Choose a random action from a distribution.
+    if (r >= THRESHOLD_0 * UINT64_MAX) {
+        return 0;
+    } else if (r >= THRESHOLD_1 * UINT64_MAX) {
+        return 1;
+    } else if (r >= THRESHOLD_2 * UINT64_MAX) {
+        return 2;
     } else {
-        // Indicate that a random action was chose.
-        q_state.random_actions++;
-
-        // Generate a random number.
-        double r = q_rand_float();
-
-        // Choose a random action from a distribution.
-        if (r >= 1.0 / 1000.0) {
-            return 0;
-        } else if (r >= 1.0 / 2000.0) {
-            return 1;
-        } else if (r >= 1.0 / 5000.0) {
-            return 2;
-        } else {
-            return 3;
-        }
+        return 3;
     }
 }
 
-// Train on index.
+// Trains on a given index in the replay table.
 static void q_train_index(uint64_t index) {
     // Extract values.
     uint8_t action = q_state.replay[index].action;
@@ -486,8 +477,11 @@ static void q_train_index(uint64_t index) {
     // Update Q-value.
     table[action] = y;
 
+    // Determine the action which we should actually use based on epsilon-greedy strategy.
+    uint8_t evaluation_action = q_select_action(q_max_index(table));
+
     // Set the tag bits and store into the hashtable.
-    *table_ptr = q_tag((uintptr_t) table, q_max_index(table));
+    *table_ptr = q_tag((uintptr_t) table, evaluation_action);
 }
 
 // Frees a hashtable entry.
@@ -529,8 +523,8 @@ learning_predict(struct _gc_runtime_state *state) {
         QObservation observation = q_observation();
         q_replay_push(&observation);
 
-        // Select an action.
-        uint8_t action = q_select_action();
+        // Select an action by evaluating the policy.
+        uint8_t action = q_evaluate((q_state.replay_index - !q_state.replay_locked) % q_state.replay_capacity);
         q_last_replay()->action = action;
 
         // Convert to GC action.
@@ -560,9 +554,6 @@ learning_predict(struct _gc_runtime_state *state) {
 static void *q_train(void *_) {
     // Get the reward.
     double reward = q_state.arg_reward;
-
-    // Increase evaluations for epsilon-greedy strategy.
-    q_state.evaluations++;
 
     // Check whether we exceeded the size of the replay table.
     if (q_state.replay_index - q_state.last_replay_index >= q_state.replay_capacity) {
@@ -601,6 +592,9 @@ static void *q_train(void *_) {
 
     // Set last replay index.
     q_state.last_replay_index = q_state.replay_index;
+
+    // Increase b for epsilon-greedy strategy.
+    q_state.evaluations++;
 
     // We should acquire GIL before unlocking the table so that it is not in the middle of an instruction.
     PyGILState_STATE gstate = PyGILState_Ensure();
