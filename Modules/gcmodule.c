@@ -2295,9 +2295,9 @@ gc_reward_impl(PyObject *module, double value)
 
         // Start training thread.
         pthread_create(&q_state.tid, NULL, q_train, NULL);
-
-        // Join the previous running thread if it exists.
+        PyGILState_Release(PyGILState_Ensure());
         pthread_join(q_state.tid, NULL);
+        PyGILState_Ensure();
     }
 
     // Return none.
