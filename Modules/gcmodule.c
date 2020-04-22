@@ -436,6 +436,9 @@ static uint8_t q_select_action(uint8_t policy_action) {
         return policy_action;
     }
 
+    // Indicate that we chose a random action.
+    q_state.random_actions++;
+
     // Generate another random number to determine which action to choose.
     uint64_t r = q_rand();
 
