@@ -276,6 +276,11 @@ static uint64_t q_rand() {
     return result;
 }
 
+// Generate a 64-bit integer within a given range of [min, max).
+static uint64_t q_rand_range(uint64_t min, uint64_t max) {
+    return min + (q_rand() % (max - min));
+}
+
 // Seed the random number generator.
 void q_seed_rand() {
     // Use a syscall.
@@ -348,7 +353,7 @@ static uintptr_t *q_get_table_ptr(uint64_t index) {
     }
 
     // Acquire GIL to perform upsert.
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    // PyGILState_STATE gstate = PyGILState_Ensure();
 
     // Do upsert, ignoring duplicate flag.
     bool is_duplicate;
@@ -356,7 +361,7 @@ static uintptr_t *q_get_table_ptr(uint64_t index) {
     *table_ptr = q_tag((uintptr_t) table, tag);
 
     // Release GIL whe insertion is complete.
-    PyGILState_Release(gstate);
+    // PyGILState_Release(gstate);
 
     // Return the pointer to the table.
     return table_ptr;
@@ -421,12 +426,38 @@ static uint8_t q_evaluate(uint64_t index) {
 }
 
 // Thresholds for random actions.
-#define THRESHOLD_0 (1.0 / 100.0)
-#define THRESHOLD_1 (1.0 / 200.0)
-#define THRESHOLD_2 (1.0 / 500.0)
+#define THRESHOLD_0 (100.0)
+#define THRESHOLD_1 (10.0)
+#define THRESHOLD_2 (10.0)
+
+// Do not change these below.
+#define THRESHOLD_DENOMINATOR (1.0 + THRESHOLD_2 \
+                                   + THRESHOLD_2 * THRESHOLD_1 \
+                                   + THRESHOLD_2 * THRESHOLD_1 * THRESHOLD_0)
+#define THRESHOLD_0_VAL ((THRESHOLD_2 * THRESHOLD_1 * THRESHOLD_0) / THRESHOLD_DENOMINATOR)
+#define THRESHOLD_1_VAL (THRESHOLD_0_VAL + (THRESHOLD_2 * THRESHOLD_1) / THRESHOLD_DENOMINATOR)
+#define THRESHOLD_2_VAL (THRESHOLD_1_VAL + (THRESHOLD_2) / THRESHOLD_DENOMINATOR)
+
+// Selects a random action from the prior distribution.
+inline static uint8_t q_random_action() {
+    // Indicate that a random action was chosen.
+    q_state.random_actions++;
+
+    // Select from prior distribution.
+    uint64_t r = q_rand();
+    if (r < THRESHOLD_0_VAL * UINT64_MAX) {
+        return 0;
+    } else if (r < THRESHOLD_1_VAL * UINT64_MAX) {
+        return 1;
+    } else if (r < THRESHOLD_2_VAL * UINT64_MAX) {
+        return 2;
+    } else {
+        return 3;
+    }
+}
 
 // Selects an action based on epsilon-greedy strategy.
-static uint8_t q_select_action(uint8_t policy_action) {
+inline static uint8_t q_select_action(uint8_t policy_action) {
     // Compute threshold.
     double eps_threshold = q_config.epsilon_end + (q_config.epsilon_start - q_config.epsilon_end)
                                                   * exp(-1.0 * q_state.evaluations / q_config.epsilon_decay);
@@ -436,22 +467,25 @@ static uint8_t q_select_action(uint8_t policy_action) {
         return policy_action;
     }
 
-    // Indicate that we chose a random action.
-    q_state.random_actions++;
+    // Select a random action.
+    return q_random_action();
+}
 
-    // Generate another random number to determine which action to choose.
-    uint64_t r = q_rand();
+// Applies the epsilon-greedy strategy to an entry in the hashtable.
+static void q_greedy_hashtable_entry(void *key_generic, void *value_generic,
+                                     size_t keysize, size_t valsize, void *context) {
+    // Get the pointer to the table.
+    uintptr_t *value = (uintptr_t *) value_generic;
+    double *table = (double *) q_untag(*value);
 
-    // Choose a random action from a distribution.
-    if (r >= THRESHOLD_0 * UINT64_MAX) {
-        return 0;
-    } else if (r >= THRESHOLD_1 * UINT64_MAX) {
-        return 1;
-    } else if (r >= THRESHOLD_2 * UINT64_MAX) {
-        return 2;
-    } else {
-        return 3;
-    }
+    // Set action using epsilon-greedy strategy.
+    *value = q_tag(*value, q_select_action(q_max_index(table)));
+}
+
+// Randomizes the choices and fixes them for the next reward cycle.
+static void q_randomize_choices() {
+    // Apply to all entries.
+    HTIterate(q_state.q_table, q_greedy_hashtable_entry, NULL);
 }
 
 // Trains on a given index in the replay table.
@@ -464,13 +498,13 @@ static void q_train_index(uint64_t index) {
     uintptr_t *table_ptr = q_get_table_ptr(index);
     double *table = (double *) q_untag(*table_ptr);
 
-    // Get future replay index and table.
-    uint64_t future_index = (index + 1) % q_state.replay_capacity;
-    uintptr_t future_table_ptr = *q_get_table_ptr(future_index);
-    double *future_table = (double *) q_untag(future_table_ptr);
+    // Get the future table.
+    uintptr_t *future_table_ptr = q_get_table_ptr((index + 1) % q_state.replay_capacity);
+    double *future_table = (double *) q_untag(*future_table_ptr);
 
-    // Estimate the optimal future value. This value must exist in the table.
-    uint8_t future_action = future_table_ptr & 0x3U;
+    // Estimate the optimal future value. Note that we do not use the cached values here, since those could have come
+    // from the randomized epsilon-greedy strategy.
+    uint8_t future_action = q_max_index(future_table);
     double q_future = future_table[future_action];
 
     // Compute desired quality value.
@@ -480,11 +514,8 @@ static void q_train_index(uint64_t index) {
     // Update Q-value.
     table[action] = y;
 
-    // Determine the action which we should actually use based on epsilon-greedy strategy.
-    uint8_t evaluation_action = q_select_action(q_max_index(table));
-
-    // Set the tag bits and store into the hashtable.
-    *table_ptr = q_tag((uintptr_t) table, evaluation_action);
+    // Determine the best action and set the tag bits.
+    *table_ptr = q_tag((uintptr_t) table, q_max_index(table));
 }
 
 // Frees a hashtable entry.
@@ -513,7 +544,7 @@ static void q_print_hashtable_entry(void *key_generic, void *value_generic,
 
 // Method to determine which generation to collect, or -1 for no collection.
 static int _Py_HOT_FUNCTION
-learning_predict(struct _gc_runtime_state *state) {
+q_predict(struct _gc_runtime_state *state) {
     // Determine whether we should use Q. Otherwise, use the default GC.
     if (q_state.enabled) {
         // Determine whether it is time to use the policy function.
@@ -528,6 +559,7 @@ learning_predict(struct _gc_runtime_state *state) {
 
         // Select an action by evaluating the policy.
         uint8_t action = q_evaluate((q_state.replay_index - !q_state.replay_locked) % q_state.replay_capacity);
+        action = q_select_action(action);
         q_last_replay()->action = action;
 
         // Convert to GC action.
@@ -596,13 +628,13 @@ static void *q_train(void *_) {
     // Set last replay index.
     q_state.last_replay_index = q_state.replay_index;
 
-    // Increase b for epsilon-greedy strategy.
+    // Increase the number of evaluations for epsilon-greedy strategy.
     q_state.evaluations++;
 
     // We should acquire GIL before unlocking the table so that it is not in the middle of an instruction.
-    PyGILState_STATE gstate = PyGILState_Ensure();
+    // PyGILState_STATE gstate = PyGILState_Ensure();
     q_state.replay_locked = false;
-    PyGILState_Release(gstate);
+    // PyGILState_Release(gstate);
 
     // Return nothing.
     return NULL;
@@ -660,7 +692,7 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     q_seed_rand();
 
     // Initialize Q state.
-    q_state.q_table = HTNew(1000, 0.89, sizeof(QKey), sizeof(uintptr_t));
+    q_state.q_table = HTNew(1024, 0.89, sizeof(QKey), sizeof(uintptr_t));
     q_state.replay_capacity = q_config.replay_size / sizeof(QTransition);
     q_state.replay_index = 0;
     q_state.last_replay_index = 0;
@@ -2294,10 +2326,8 @@ gc_reward_impl(PyObject *module, double value)
         q_state.arg_reward = value;
 
         // Start training thread.
-        pthread_create(&q_state.tid, NULL, q_train, NULL);
-        PyGILState_Release(PyGILState_Ensure());
-        pthread_join(q_state.tid, NULL);
-        PyGILState_Ensure();
+        // pthread_create(&q_state.tid, NULL, q_train, NULL);
+        q_train(NULL);
     }
 
     // Return none.
@@ -2608,7 +2638,7 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
     // Determine if collection should occur and which generation to collect.
     if (state->enabled && !state->collecting && !PyErr_Occurred()) {
         // Make a prediction.
-        int generation = learning_predict(state);
+        int generation = q_predict(state);
 
         // Perform collection if necessary.
         if (generation != -1) {
