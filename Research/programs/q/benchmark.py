@@ -31,7 +31,7 @@ def collect(operation, reward):
 
         # Provide a reward based on time.
         r = reward(delta_time, memory)
-        gc.reward(r)
+        # gc.reward(r)
 
         # Set zero time.
         if zero_time is None:

@@ -100,7 +100,7 @@ _PyMem_RawMalloc(void *ctx, size_t size)
         size = 1;
     void* ptr = malloc(size);
     __sync_fetch_and_add(&memory_usage, malloc_usable_size(ptr));
-    return malloc(size);
+    return ptr;
 }
 
 static void *
@@ -116,7 +116,7 @@ _PyMem_RawCalloc(void *ctx, size_t nelem, size_t elsize)
     }
     void* ptr = calloc(nelem, elsize);
     __sync_fetch_and_add(&memory_usage, malloc_usable_size(ptr));
-    return calloc(nelem, elsize);
+    return ptr;
 }
 
 static void *

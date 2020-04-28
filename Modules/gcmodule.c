@@ -482,10 +482,28 @@ static void q_greedy_hashtable_entry(void *key_generic, void *value_generic,
     *value = q_tag(*value, q_select_action(q_max_index(table)));
 }
 
+// Resets a hashtable entry to remove any greedy selections.
+static void q_reset_hashtable_entry(void *key_generic, void *value_generic,
+                                    size_t keysize, size_t valsize, void *context) {
+    // Get the pointer to the table.
+    uintptr_t *value = (uintptr_t *) value_generic;
+    double *table = (double *) q_untag(*value);
+
+    // Set action using epsilon-greedy strategy.
+    *value = q_tag(*value, q_max_index(table));
+}
+
+
 // Randomizes the choices and fixes them for the next reward cycle.
 static void q_randomize_choices() {
     // Apply to all entries.
     HTIterate(q_state.q_table, q_greedy_hashtable_entry, NULL);
+}
+
+// Clears randomziation.
+static void q_clear_randomization() {
+    // Apply to all entries.
+    HTIterate(q_state.q_table, q_reset_hashtable_entry, NULL);
 }
 
 // Trains on a given index in the replay table.
@@ -515,7 +533,7 @@ static void q_train_index(uint64_t index) {
     table[action] = y;
 
     // Determine the best action and set the tag bits.
-    *table_ptr = q_tag((uintptr_t) table, q_max_index(table));
+    *table_ptr = q_tag((uintptr_t) table, q_select_action(q_max_index(table)));
 }
 
 // Frees a hashtable entry.
@@ -557,9 +575,11 @@ q_predict(struct _gc_runtime_state *state) {
         QObservation observation = q_observation();
         q_replay_push(&observation);
 
-        // Select an action by evaluating the policy.
+        // Select an action by evaluating the policy and then apply the epsilon-greedy strategy.
         uint8_t action = q_evaluate((q_state.replay_index - !q_state.replay_locked) % q_state.replay_capacity);
         action = q_select_action(action);
+
+        // Store the chosen action.
         q_last_replay()->action = action;
 
         // Convert to GC action.
