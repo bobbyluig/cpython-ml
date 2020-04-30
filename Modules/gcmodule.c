@@ -295,7 +295,8 @@ static uint64_t q_rand() {
 }
 
 // Generate a 64-bit integer within a given range of [min, max).
-static uint64_t q_rand_range(uint64_t min, uint64_t max) __attribute__((unused)) {
+__attribute__((unused))
+static uint64_t q_rand_range(uint64_t min, uint64_t max) {
     return min + (q_rand() % (max - min));
 }
 
@@ -503,7 +504,8 @@ static void q_clear_randomization_entry(void *key_generic, void *value_generic,
 }
 
 // Clears randomization.
-static void q_clear_randomization() __attribute__((unused)) {
+__attribute__((unused))
+static void q_clear_randomization() {
     // Apply to all entries.
     HTIterate(q_state.q_table, q_clear_randomization_entry, NULL);
 }
