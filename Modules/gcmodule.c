@@ -158,7 +158,7 @@ typedef struct QTransition {
 
 // Struct for Q config.
 static struct QConfig {
-    // Capacity for replay memory in bytes.
+    // Capacity for replay memory in bytes. Must be a power of 2.
     uint64_t replay_size;
     // Learning rate for ANN.
     double learning_rate;
@@ -168,7 +168,7 @@ static struct QConfig {
     double epsilon_decay;
     // Gamma value for non-terminal sequences.
     double gamma;
-    // The number of objects to skip before performing evaluation.
+    // The number of objects to skip before performing evaluation. Must be a power of 2.
     uint64_t skip;
     // The maximum memory in bytes for Q-table.
     uint64_t max_memory;
@@ -217,6 +217,24 @@ typedef struct QKey {
 
 /*** Begin Q functions. ***/
 
+// Rounds a number to the next power of 2.
+static uint64_t q_next_power_of_two(uint64_t v) {
+    v--;
+    v |= v >> 1U;
+    v |= v >> 2U;
+    v |= v >> 4U;
+    v |= v >> 8U;
+    v |= v >> 16U;
+    v |= v >> 32U;
+    v++;
+    return v;
+}
+
+// Gets the index in a circular buffer.
+static inline uint64_t q_index(uint64_t index) {
+    return index & (q_state.replay_capacity - 1);
+}
+
 // Creates a Q-table key.
 static QKey q_create_key(uint64_t instruction, uint64_t memory) {
     // Memory should be capped.
@@ -232,17 +250,17 @@ static QKey q_create_key(uint64_t instruction, uint64_t memory) {
 }
 
 // Gets the instruction of a Q-table key.
-static uint64_t q_key_instruction(QKey key) {
+static inline uint64_t q_key_instruction(QKey key) {
     return key.packed >> 16U;
 }
 
 // Gets the memory of a Q-table key.
-static uint64_t q_key_memory(QKey key) {
+static inline uint64_t q_key_memory(QKey key) {
     return key.packed & 0xFFFFU;
 }
 
 // Hashes a key using the Thomas Wang's 64-bit mix function.
-static uint64_t q_hash(void *key_generic, size_t size) {
+static inline uint64_t q_hash(void *key_generic, size_t size) {
     uint64_t key = ((QKey *) key_generic)->packed;
     key = (~key) + (key << 21U);
     key = key ^ (key >> 24U);
@@ -353,7 +371,7 @@ static uintptr_t *q_get_table_ptr(uint64_t index) {
     }
 
     // Acquire GIL to perform upsert.
-    // PyGILState_STATE gstate = PyGILState_Ensure();
+    PyGILState_STATE gstate = PyGILState_Ensure();
 
     // Do upsert, ignoring duplicate flag.
     bool is_duplicate;
@@ -361,14 +379,14 @@ static uintptr_t *q_get_table_ptr(uint64_t index) {
     *table_ptr = q_tag((uintptr_t) table, tag);
 
     // Release GIL whe insertion is complete.
-    // PyGILState_Release(gstate);
+    PyGILState_Release(gstate);
 
     // Return the pointer to the table.
     return table_ptr;
 }
 
-// Pushes a frame into reply memory.
-static void q_replay_push(QObservation *observation) {
+// Pushes a frame into replay memory and returns the address of the replay.
+static QTransition *q_replay_push(QObservation *observation) {
     // Create transition.
     QTransition transition;
     transition.observation = *observation;
@@ -376,18 +394,21 @@ static void q_replay_push(QObservation *observation) {
     transition.action = 0;
 
     // Store into replay memory.
-    uint64_t index = q_state.replay_index % q_state.replay_capacity;
+    uint64_t index = q_index(q_state.replay_index);
     q_state.replay[index] = transition;
 
     // If the replay table is not locked, increment the replay index.
     q_state.replay_index += !q_state.replay_locked;
+
+    // Return the address of the replay function.
+    return &q_state.replay[index];
 }
 
 // Gets the last frame in the replay memory. This method should only be called after a call to push an observation.
 static QTransition *q_last_replay() {
     // When the replay is locked, then the training thread is running. The replay index does not change, and therefore
     // the previous index is just the replay index.
-    uint64_t previous_index = (q_state.replay_index - !q_state.replay_locked) % q_state.replay_capacity;
+    uint64_t previous_index = q_index(q_state.replay_index - !q_state.replay_locked);
     return &(q_state.replay[previous_index]);
 }
 
@@ -405,9 +426,9 @@ static uint8_t q_max_index(const double *table) {
 
 // Evaluates the policy function and returns the index of the best output. In the case that there are no entries in the
 // Q-table corresponding to the state, then the index of the best value under the default policy is returned.
-static uint8_t q_evaluate(uint64_t index) {
+static uint8_t q_evaluate(QTransition *replay) {
     // Fetch the entry from the hashtable.
-    QObservation observation = q_state.replay[index].observation;
+    QObservation observation = replay->observation;
     QKey key = q_create_key(observation.instruction, observation.memory);
     uintptr_t *table_ptr = HTGetCustom(q_state.q_table, q_hash, &key);
 
@@ -426,7 +447,7 @@ static uint8_t q_evaluate(uint64_t index) {
 }
 
 // Thresholds for random actions.
-#define THRESHOLD_0 (100.0)
+#define THRESHOLD_0 (10.0)
 #define THRESHOLD_1 (10.0)
 #define THRESHOLD_2 (10.0)
 
@@ -456,54 +477,34 @@ inline static uint8_t q_random_action() {
     }
 }
 
-// Selects an action based on epsilon-greedy strategy.
-inline static uint8_t q_select_action(uint8_t policy_action) {
+// Determines whether the epsilon greedy strategy should be used.
+static inline bool q_use_random_action() {
     // Compute threshold.
     double eps_threshold = q_config.epsilon_end + (q_config.epsilon_start - q_config.epsilon_end)
                                                   * exp(-1.0 * q_state.evaluations / q_config.epsilon_decay);
 
     // Determine if we should just use the policy action instead of a random action.
-    if (q_rand() > eps_threshold * UINT64_MAX) {
-        return policy_action;
+    return (q_rand() <= eps_threshold * UINT64_MAX);
+}
+
+// Clears randomization for a hashtable entry.
+static void q_clear_randomization_entry(void *key_generic, void *value_generic,
+                                        size_t keysize, size_t valsize, void *context) {
+    // Get the pointer to the table.
+    uintptr_t *value = (uintptr_t *) value_generic;
+
+    // If the tag bit is set, then the entry was force randomized. Reset it.
+    if (*value & 0x4U) {
+        // Set the max value.
+        double *table = (double *) q_untag(*value);
+        *value = q_tag(*value, q_max_index(table));
     }
-
-    // Select a random action.
-    return q_random_action();
 }
 
-// Applies the epsilon-greedy strategy to an entry in the hashtable.
-static void q_greedy_hashtable_entry(void *key_generic, void *value_generic,
-                                     size_t keysize, size_t valsize, void *context) {
-    // Get the pointer to the table.
-    uintptr_t *value = (uintptr_t *) value_generic;
-    double *table = (double *) q_untag(*value);
-
-    // Set action using epsilon-greedy strategy.
-    *value = q_tag(*value, q_select_action(q_max_index(table)));
-}
-
-// Resets a hashtable entry to remove any greedy selections.
-static void q_reset_hashtable_entry(void *key_generic, void *value_generic,
-                                    size_t keysize, size_t valsize, void *context) {
-    // Get the pointer to the table.
-    uintptr_t *value = (uintptr_t *) value_generic;
-    double *table = (double *) q_untag(*value);
-
-    // Set action using epsilon-greedy strategy.
-    *value = q_tag(*value, q_max_index(table));
-}
-
-
-// Randomizes the choices and fixes them for the next reward cycle.
-static void q_randomize_choices() {
-    // Apply to all entries.
-    HTIterate(q_state.q_table, q_greedy_hashtable_entry, NULL);
-}
-
-// Clears randomziation.
+// Clears randomization.
 static void q_clear_randomization() {
     // Apply to all entries.
-    HTIterate(q_state.q_table, q_reset_hashtable_entry, NULL);
+    HTIterate(q_state.q_table, q_clear_randomization_entry, NULL);
 }
 
 // Trains on a given index in the replay table.
@@ -517,7 +518,7 @@ static void q_train_index(uint64_t index) {
     double *table = (double *) q_untag(*table_ptr);
 
     // Get the future table.
-    uintptr_t *future_table_ptr = q_get_table_ptr((index + 1) % q_state.replay_capacity);
+    uintptr_t *future_table_ptr = q_get_table_ptr(q_index(index + 1));
     double *future_table = (double *) q_untag(*future_table_ptr);
 
     // Estimate the optimal future value. Note that we do not use the cached values here, since those could have come
@@ -533,7 +534,7 @@ static void q_train_index(uint64_t index) {
     table[action] = y;
 
     // Determine the best action and set the tag bits.
-    *table_ptr = q_tag((uintptr_t) table, q_select_action(q_max_index(table)));
+    *table_ptr = q_tag((uintptr_t) table, q_max_index(table));
 }
 
 // Frees a hashtable entry.
@@ -566,21 +567,21 @@ q_predict(struct _gc_runtime_state *state) {
     // Determine whether we should use Q. Otherwise, use the default GC.
     if (q_state.enabled) {
         // Determine whether it is time to use the policy function.
-        if (q_state.objects++ % q_config.skip != 0) {
+        if ((q_state.objects++ & (q_config.skip - 1)) != 0) {
             return -1;
         }
 
         // Store the observation and select an action.
-        // Store to replay if the replay is not locked.
         QObservation observation = q_observation();
-        q_replay_push(&observation);
+        QTransition *replay = q_replay_push(&observation);
 
-        // Select an action by evaluating the policy and then apply the epsilon-greedy strategy.
-        uint8_t action = q_evaluate((q_state.replay_index - !q_state.replay_locked) % q_state.replay_capacity);
-        action = q_select_action(action);
+        // Determine if we should evaluate of use the epsilon-greedy strategy.
+        uint8_t action = q_use_random_action()
+                ? q_random_action()
+                : q_evaluate(replay);
 
         // Store the chosen action.
-        q_last_replay()->action = action;
+        replay->action = action;
 
         // Convert to GC action.
         return ((int) action) - 1;
@@ -625,12 +626,12 @@ static void *q_train(void *_) {
 
         // Do training on everything in the replay table backwards.
         for (uint64_t i = q_state.replay_index; i != q_state.replay_index - q_state.replay_capacity; i--) {
-            q_train_index(i % q_state.replay_capacity);
+            q_train_index(q_index(i));
         }
     } else {
         // Apply reward to new observations.
         for (uint64_t i = q_state.last_replay_index; i < q_state.replay_index; i++) {
-            q_state.replay[i % q_state.replay_capacity].reward += reward;
+            q_state.replay[q_index(i)].reward += reward;
         }
 
         // Try to find what the ending index is. We want to train on one before the last replay index if possible.
@@ -641,7 +642,7 @@ static void *q_train(void *_) {
         // Do some training. The replay index is one after the last entry. We start at two before the replay index,
         // which is the second to last entry and therefore has a next entry for future value computation.
         for (uint64_t i = q_state.replay_index - 2; i != end; i--) {
-            q_train_index(i % q_state.replay_capacity);
+            q_train_index(q_index(i));
         }
     }
 
@@ -651,10 +652,10 @@ static void *q_train(void *_) {
     // Increase the number of evaluations for epsilon-greedy strategy.
     q_state.evaluations++;
 
-    // We should acquire GIL before unlocking the table so that it is not in the middle of an instruction.
-    // PyGILState_STATE gstate = PyGILState_Ensure();
+    // It's tempting to acquire GIL here before unlocking the table so that we are not in the middle of instruction.
+    // However, we don't need to do. This increase performance at the expense of the loss of bit of of reward shaping
+    // information if this somehow happens in the middle of an GC allocation.
     q_state.replay_locked = false;
-    // PyGILState_Release(gstate);
 
     // Return nothing.
     return NULL;
@@ -707,6 +708,10 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     q_config.fence_memory = (q_fence_memory != NULL) ? (uint64_t) atoll(q_fence_memory) : q_config.max_memory;
     q_config.fence_penalty = (q_fence_penalty != NULL) ? atof(q_fence_penalty) : 1.0;
     q_config.memory_step = (q_memory_step != NULL) ? (uint16_t) atoi(q_memory_step) : 20U;
+
+    // Round to next power of 2 for some parameters.
+    q_config.replay_size = q_next_power_of_two(q_config.replay_size);
+    q_config.skip = q_next_power_of_two(q_config.skip);
 
     // Seed RNG.
     q_seed_rand();
@@ -2334,20 +2339,17 @@ gc_reward_impl(PyObject *module, double value)
         printf("Saw %lu sites.\n", (q_state.replay_index - q_state.last_replay_index));
     }
 
-    // Create thread if training is not already ongoing.
+    // Create thread if training is not already ongoing. We do not need to join here since the flag toggle is the last
+    // thing that happens in the thread.
     if (!q_state.replay_locked) {
         // Lock the replay table.
         q_state.replay_locked = true;
-
-        // Join the previous running thread if it exists.
-        pthread_join(q_state.tid, NULL);
 
         // Pass in argument.
         q_state.arg_reward = value;
 
         // Start training thread.
-        // pthread_create(&q_state.tid, NULL, q_train, NULL);
-        q_train(NULL);
+        pthread_create(&q_state.tid, NULL, q_train, NULL);
     }
 
     // Return none.
@@ -2663,15 +2665,21 @@ _PyObject_GC_Alloc(int use_calloc, size_t basicsize)
         // Perform collection if necessary.
         if (generation != -1) {
             // Track time of collection.
+            // TODO(bobbyluig): Improve timing performance.
+            // TODO(bobbyluig): Try different reward shaping.
             _PyTime_t t1 = _PyTime_GetMonotonicClock();
             _PyRuntime.gc.collecting = 1;
             collect_with_callback(state, generation);
             _PyRuntime.gc.collecting = 0;
             _PyTime_t t2 = _PyTime_GetMonotonicClock();
 
-            // If there is some entry in the replay history, apply reward shaping.
+            // If there is some entry in the replay history, apply reward shaping. If the replay table switched from
+            // locked to unlocked here, this is okay because the reward shaping information is effectively discarded
+            // for this entry only.
             if (q_state.replay_index > 0) {
-                q_last_replay()->reward -= _PyTime_AsSecondsDouble(t2 - t1) / 100;
+                // Divide by a power of two, which takes less cycles. This is applied even under full compliance mode
+                // in GCC. See https://gcc.gnu.org/wiki/FloatingPointMath.
+                q_last_replay()->reward -= _PyTime_AsSecondsDouble(t2 - t1) / 128;
             }
         }
     }
