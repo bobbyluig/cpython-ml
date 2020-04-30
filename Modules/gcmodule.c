@@ -295,7 +295,7 @@ static uint64_t q_rand() {
 }
 
 // Generate a 64-bit integer within a given range of [min, max).
-static uint64_t q_rand_range(uint64_t min, uint64_t max) {
+static uint64_t q_rand_range(uint64_t min, uint64_t max) __attribute__((unused)) {
     return min + (q_rand() % (max - min));
 }
 
@@ -323,6 +323,7 @@ static QObservation q_observation() {
     observation.memory = memory_usage;
 
     // Update the instruction location from the thread state.
+    // TODO(bobbyluig): Find a faster way to get the instruction.
     PyThreadState *ts = PyThreadState_Get();
     if (ts->frame != NULL && ts->frame->f_lasti >= 0) {
         observation.instruction = ts->frame->f_code->co_id + ts->frame->f_lasti / sizeof(_Py_CODEUNIT);
@@ -502,7 +503,7 @@ static void q_clear_randomization_entry(void *key_generic, void *value_generic,
 }
 
 // Clears randomization.
-static void q_clear_randomization() {
+static void q_clear_randomization() __attribute__((unused)) {
     // Apply to all entries.
     HTIterate(q_state.q_table, q_clear_randomization_entry, NULL);
 }
