@@ -612,6 +612,7 @@ static void *q_train(void *_) {
     double reward = q_state.arg_reward;
 
     // Check whether we exceeded the size of the replay table.
+    // TODO(bobbyluig): This condition might not be correct.
     if (q_state.replay_index - q_state.last_replay_index >= q_state.replay_capacity) {
         // Warn about exceeding the replay table size.
         if (!q_state.did_warn) {
@@ -630,6 +631,7 @@ static void *q_train(void *_) {
         }
     } else {
         // Apply reward to new observations.
+        // TODO(bobbyluig): Manually unroll and fuse loops to reduce cache misses.
         for (uint64_t i = q_state.last_replay_index; i < q_state.replay_index; i++) {
             q_state.replay[q_index(i)].reward += reward;
         }
