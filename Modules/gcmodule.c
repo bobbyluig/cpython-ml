@@ -193,6 +193,8 @@ static struct QState {
     uint64_t last_replay_index;
     // The number of evaluations.
     uint64_t evaluations;
+    // The current epsilon value.
+    double epsilon;
     // The number of objects seen.
     uint64_t objects;
     // The number of random actions taken.
@@ -481,12 +483,7 @@ inline static uint8_t q_random_action() {
 
 // Determines whether the epsilon greedy strategy should be used.
 static inline bool q_use_random_action() {
-    // Compute threshold.
-    double eps_threshold = q_config.epsilon_end + (q_config.epsilon_start - q_config.epsilon_end)
-                                                  * exp(-1.0 * q_state.evaluations / q_config.epsilon_decay);
-
-    // Determine if we should just use the policy action instead of a random action.
-    return (q_rand() <= eps_threshold * UINT64_MAX);
+    return q_rand() <= q_state.epsilon * UINT64_MAX;
 }
 
 // Clears randomization for a hashtable entry.
@@ -652,8 +649,10 @@ static void *q_train(void *_) {
     // Set last replay index.
     q_state.last_replay_index = q_state.replay_index;
 
-    // Increase the number of evaluations for epsilon-greedy strategy.
+    // Update the epsilon value in the epsilon-greedy strategy.
     q_state.evaluations++;
+    q_state.epsilon = q_config.epsilon_end + (q_config.epsilon_start - q_config.epsilon_end)
+                                             * exp(-1.0 * q_state.evaluations / q_config.epsilon_decay);
 
     // It's tempting to acquire GIL here before unlocking the table so that we are not in the middle of instruction.
     // However, we don't need to do. This increase performance at the expense of the loss of bit of of reward shaping
@@ -726,6 +725,7 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     q_state.last_replay_index = 0;
     q_state.replay = PyMem_RawMalloc(q_state.replay_capacity * sizeof(QTransition));
     q_state.evaluations = 0;
+    q_state.epsilon = q_config.epsilon_start;
     q_state.objects = 0;
     q_state.random_actions = 0;
     q_state.enabled = false;
@@ -1828,28 +1828,29 @@ collect_with_callback(struct _gc_runtime_state *state, int generation)
     return result;
 }
 
-//static Py_ssize_t
-//collect_generations(struct _gc_runtime_state *state)
-//{
-//    /* Find the oldest generation (highest numbered) where the count
-//     * exceeds the threshold.  Objects in the that generation and
-//     * generations younger than it will be collected. */
-//    Py_ssize_t n = 0;
-//    for (int i = NUM_GENERATIONS-1; i >= 0; i--) {
-//        if (state->generations[i].count > state->generations[i].threshold) {
-//            /* Avoid quadratic performance degradation in number
-//               of tracked objects. See comments at the beginning
-//               of this file, and issue #4074.
-//            */
-//            if (i == NUM_GENERATIONS - 1
-//                && state->long_lived_pending < state->long_lived_total / 4)
-//                continue;
-//            n = collect_with_callback(state, i);
-//            break;
-//        }
-//    }
-//    return n;
-//}
+__attribute__((unused))
+static Py_ssize_t
+collect_generations(struct _gc_runtime_state *state)
+{
+    /* Find the oldest generation (highest numbered) where the count
+     * exceeds the threshold.  Objects in the that generation and
+     * generations younger than it will be collected. */
+    Py_ssize_t n = 0;
+    for (int i = NUM_GENERATIONS-1; i >= 0; i--) {
+        if (state->generations[i].count > state->generations[i].threshold) {
+            /* Avoid quadratic performance degradation in number
+               of tracked objects. See comments at the beginning
+               of this file, and issue #4074.
+            */
+            if (i == NUM_GENERATIONS - 1
+                && state->long_lived_pending < state->long_lived_total / 4)
+                continue;
+            n = collect_with_callback(state, i);
+            break;
+        }
+    }
+    return n;
+}
 
 #include "clinic/gcmodule.c.h"
 
