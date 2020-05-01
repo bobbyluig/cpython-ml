@@ -657,7 +657,7 @@ static void *q_train(void *_) {
                                              * exp(-1.0 * q_state.evaluations / q_config.epsilon_decay);
 
     // It's tempting to acquire GIL here before unlocking the table so that we are not in the middle of instruction.
-    // However, we don't need to do. This increase performance at the expense of the loss of bit of of reward shaping
+    // However, we don't need to. This increases performance at the expense of the loss of bit of of reward shaping
     // information if this somehow happens in the middle of an GC allocation.
     q_state.replay_locked = false;
 
