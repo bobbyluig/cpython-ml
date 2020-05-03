@@ -1,5 +1,6 @@
 import gc
 import time
+import os
 
 
 def collect(operation, reward):
@@ -43,7 +44,7 @@ def collect(operation, reward):
         # Time since start.
         time_since_start = current_time - zero_time
         if time_since_start > 60 * 10:
-            break
+            os._exit(0)
 
         # Change in number of actions.
         actions = gc.random_actions() - random_start

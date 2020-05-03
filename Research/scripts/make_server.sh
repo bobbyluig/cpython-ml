@@ -1,0 +1,1 @@
+make -j8 && cp python ../python3/bin/python3.8
