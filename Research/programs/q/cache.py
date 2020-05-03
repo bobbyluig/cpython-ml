@@ -35,8 +35,6 @@ def operation():
         create_ll(size)
 
 
-# GC Information
-# Instructions: 10
 if __name__ == '__main__':
     # Warm up
     random.seed(0)

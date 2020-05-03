@@ -73,13 +73,16 @@ def reward():
         # Provide reward.
         gc.reward(r)
 
+        # Show how the policy is evolving over time.
+        gc.print_policy()
+
         # Set zero time.
         if zero_time is None:
             zero_time = current_time
 
         # Time since start.
         time_since_start = current_time - zero_time
-        if time_since_start > 60 * 5:
+        if time_since_start > 60 * 10:
             os._exit(0)
 
         # Change in number of actions.
@@ -106,8 +109,6 @@ def hello_world():
     return 'Hello World!'
 
 
-# GC Information
-# Instructions: 202
 if __name__ == '__main__':
     log = logging.getLogger('werkzeug')
     log.setLevel(logging.ERROR)

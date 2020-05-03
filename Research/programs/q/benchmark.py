@@ -33,13 +33,16 @@ def collect(operation, reward):
         r = reward(delta_time, memory)
         gc.reward(r)
 
+        # Show how the policy is evolving over time.
+        gc.print_policy()
+
         # Set zero time.
         if zero_time is None:
             zero_time = current_time
 
         # Time since start.
         time_since_start = current_time - zero_time
-        if time_since_start > 60 * 5:
+        if time_since_start > 60 * 10:
             break
 
         # Change in number of actions.

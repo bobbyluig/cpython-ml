@@ -51,8 +51,6 @@ def operation():
         simulate(100, 2)
 
 
-# GC Information
-# Instructions: 26
 if __name__ == '__main__':
     # Reward function.
     def reward(t, m):

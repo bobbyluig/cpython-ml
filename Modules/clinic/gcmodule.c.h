@@ -463,4 +463,22 @@ gc_random_actions(PyObject *module, PyObject *Py_UNUSED(ignored))
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=d83c70bb052d0d36 input=a9049054013a1b77]*/
+
+PyDoc_STRVAR(gc_print_policy__doc__,
+"print_policy($module, /)\n"
+"--\n"
+"\n"
+"Print the current policy.");
+
+#define GC_PRINT_POLICY_METHODDEF    \
+    {"print_policy", (PyCFunction)gc_print_policy, METH_NOARGS, gc_print_policy__doc__},
+
+static PyObject *
+gc_print_policy_impl(PyObject *module);
+
+static PyObject *
+gc_print_policy(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    return gc_print_policy_impl(module);
+}
+/*[clinic end generated code: output=8224bb699030a13b input=a9049054013a1b77]*/

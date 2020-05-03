@@ -470,11 +470,11 @@ inline static uint8_t q_random_action() {
 
     // Select from prior distribution.
     uint64_t r = q_rand();
-    if (r < THRESHOLD_0_VAL * UINT64_MAX) {
+    if (r < THRESHOLD_0_VAL * (double) UINT64_MAX) {
         return 0;
-    } else if (r < THRESHOLD_1_VAL * UINT64_MAX) {
+    } else if (r < THRESHOLD_1_VAL * (double) UINT64_MAX) {
         return 1;
-    } else if (r < THRESHOLD_2_VAL * UINT64_MAX) {
+    } else if (r < THRESHOLD_2_VAL * (double) UINT64_MAX) {
         return 2;
     } else {
         return 3;
@@ -483,7 +483,7 @@ inline static uint8_t q_random_action() {
 
 // Determines whether the epsilon greedy strategy should be used.
 static inline bool q_use_random_action() {
-    return q_rand() <= q_state.epsilon * UINT64_MAX;
+    return q_rand() <= q_state.epsilon * (double) UINT64_MAX;
 }
 
 // Clears randomization for a hashtable entry.
@@ -2364,27 +2364,44 @@ gc_reward_impl(PyObject *module, double value)
 
 /*[clinic input]
 gc.memory_usage -> Py_ssize_t
+
 Return the current memory usage in bytes.
 [clinic start generated code]*/
 
 static Py_ssize_t
 gc_memory_usage_impl(PyObject *module)
-/*[clinic end generated code: output=6bf0a65d36800cc7 input=9dcbf3d29dfa5bd9]*/
+/*[clinic end generated code: output=6bf0a65d36800cc7 input=2d10d1974931c7e8]*/
 {
     return memory_usage;
 }
 
 /*[clinic input]
 gc.random_actions -> Py_ssize_t
+
 Return the number of random actions taken.
 [clinic start generated code]*/
 
 static Py_ssize_t
 gc_random_actions_impl(PyObject *module)
-/*[clinic end generated code: output=133936503d7dbfa1 input=15be10bb87d5f818]*/
+/*[clinic end generated code: output=133936503d7dbfa1 input=4554699585433668]*/
 {
     return q_state.random_actions;
 }
+
+/*[clinic input]
+gc.print_policy
+
+Print the current policy.
+[clinic start generated code]*/
+
+static PyObject *
+gc_print_policy_impl(PyObject *module)
+/*[clinic end generated code: output=c5ed3d00cb42d9fe input=57af52ec6cc6c923]*/
+{
+    HTIterate(q_state.q_table, q_print_hashtable_entry, NULL);
+    Py_RETURN_NONE;
+}
+
 
 
 PyDoc_STRVAR(gc__doc__,
@@ -2431,6 +2448,7 @@ static PyMethodDef GcMethods[] = {
     GC_REWARD_METHODDEF
     GC_MEMORY_USAGE_METHODDEF
     GC_RANDOM_ACTIONS_METHODDEF
+    GC_PRINT_POLICY_METHODDEF
     {NULL,      NULL}           /* Sentinel */
 };
 
@@ -2592,8 +2610,8 @@ _PyGC_Fini(_PyRuntimeState *runtime)
     pthread_join(q_state.tid, NULL);
     PyGILState_Ensure();
 
-    // Print metadata.
-    HTIterate(q_state.q_table, q_print_hashtable_entry, NULL);
+    // Print policy.
+    gc_print_policy_impl(NULL);
 
     // Print aggregate table statistics.
     if (HTObjcnt(q_state.q_table) > 0) {
