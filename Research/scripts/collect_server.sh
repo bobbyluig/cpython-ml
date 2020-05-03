@@ -1,6 +1,6 @@
 for learningRate in '0.001' '0.01' '0.1'
 do
-  for ((i = 1; i <= 1; i++))
+  for ((i = 1; i <= 10; i++))
   do
     # Transaction program.
     echo "Transaction $learningRate $i"
