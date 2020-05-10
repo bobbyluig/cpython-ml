@@ -513,27 +513,6 @@ static uint8_t q_evaluate(QTransition *replay) {
     }
 }
 
-// Clears randomization for a hashtable entry.
-static void q_clear_randomization_entry(void *key_generic, void *value_generic,
-                                        size_t keysize, size_t valsize, void *context) {
-    // Get the pointer to the table.
-    uintptr_t *value = (uintptr_t *) value_generic;
-
-    // If the tag bit is set, then the entry was force randomized. Reset it.
-    if (*value & 0x4U) {
-        // Set the max value.
-        double *table = (double *) q_untag(*value);
-        *value = q_tag(*value, q_max_index(table));
-    }
-}
-
-// Clears randomization.
-__attribute__((unused))
-static void q_clear_randomization() {
-    // Apply to all entries.
-    HTIterate(q_state.q_table, q_clear_randomization_entry, NULL);
-}
-
 // Trains on a given index in the replay table.
 static void q_train_index(uint64_t index, QTrainingState *state) {
     // Extract values.
