@@ -191,10 +191,10 @@ static struct QState {
     uint64_t replay_index;
     // The last index that was sampled from. At most the replay index.
     uint64_t last_replay_index;
-    // The number of evaluations.
-    uint64_t evaluations;
-    // The current epsilon value.
-    double epsilon;
+    // The number of training iterations.
+    uint64_t trainings;
+    // The epsilon decay factor.
+    double epsilon_factor;
     // The number of objects seen.
     uint64_t objects;
     // The number of random actions taken.
@@ -216,6 +216,20 @@ typedef struct QKey {
     // The packed value including the instruction and the memory.
     uint64_t packed;
 } QKey;
+
+// Value for Q-table.
+typedef struct QValue {
+    // The tagged pointer to the Q-table.
+    uintptr_t table;
+    // The current epsilon value.
+    double epsilon;
+} QValue;
+
+// Training state.
+typedef struct QTrainingState {
+    // The set of processed keys.
+    OPHashTable *seen_keys;
+} QTrainingState;
 
 /*** Begin Q functions. ***/
 
@@ -282,24 +296,26 @@ static inline uint64_t q_rotl(const uint64_t x, unsigned int k) {
     return (x << k) | (x >> (64U - k));
 }
 
-// Generate a random 64-bit integer using xoshiro256++.
-static uint64_t q_rand() {
-    const uint64_t result = q_rotl(q_seed[0] + q_seed[3], 23) + q_seed[0];
+// Interpret bits as a double. This gets optimized down to two MOVs.
+static inline double q_as_double(uint64_t x) {
+    double d;
+    memcpy(&d, &x, sizeof(double));
+    return d;
+}
+
+// Generate a random double in [0, 1) using xoshiro256+.
+static double q_rand() {
+    const uint64_t result = q_seed[0] + q_seed[3];
 
     q_seed[2] ^= q_seed[0];
     q_seed[3] ^= q_seed[1];
     q_seed[1] ^= q_seed[2];
     q_seed[0] ^= q_seed[3];
     q_seed[2] ^= q_seed[1] << 17U;
-    q_seed[3] = q_rotl(q_seed[3], 45U);
+    q_seed[3] = q_rotl(q_seed[3], 45);
 
-    return result;
-}
-
-// Generate a 64-bit integer within a given range of [min, max).
-__attribute__((unused))
-static uint64_t q_rand_range(uint64_t min, uint64_t max) {
-    return min + (q_rand() % (max - min));
+    // See https://experilous.com/1/blog/post/perfect-fast-random-floating-point-numbers.
+    return q_as_double(0x3FF0000000000000ULL | (result >> 12U)) - 1.0;
 }
 
 // Seed the random number generator.
@@ -316,6 +332,44 @@ static inline uintptr_t q_untag(uintptr_t ptr) {
 // Tag pointer.
 static inline uintptr_t q_tag(uintptr_t ptr, uintptr_t tag) {
     return q_untag(ptr) | (tag & 0x7ULL);
+}
+
+
+// Thresholds for random actions.
+#define THRESHOLD_0 (10.0)
+#define THRESHOLD_1 (10.0)
+#define THRESHOLD_2 (10.0)
+
+// Do not change these below.
+#define THRESHOLD_DENOMINATOR (1.0 + THRESHOLD_2 \
+                                   + THRESHOLD_2 * THRESHOLD_1 \
+                                   + THRESHOLD_2 * THRESHOLD_1 * THRESHOLD_0)
+#define THRESHOLD_0_VAL ((THRESHOLD_2 * THRESHOLD_1 * THRESHOLD_0) / THRESHOLD_DENOMINATOR)
+#define THRESHOLD_1_VAL (THRESHOLD_0_VAL + (THRESHOLD_2 * THRESHOLD_1) / THRESHOLD_DENOMINATOR)
+#define THRESHOLD_2_VAL (THRESHOLD_1_VAL + (THRESHOLD_2) / THRESHOLD_DENOMINATOR)
+
+// Selects a random action from the prior distribution.
+inline static uint8_t q_random_action() {
+    // Indicate that a random action was chosen.
+    q_state.random_actions++;
+
+    // Select from prior distribution.
+    double r = q_rand();
+    if (r < THRESHOLD_0_VAL) {
+        return 0;
+    } else if (r < THRESHOLD_1_VAL) {
+        return 1;
+    } else if (r < THRESHOLD_2_VAL) {
+        return 2;
+    } else {
+        return 3;
+    }
+}
+
+// Determines whether the epsilon greedy strategy should be used.
+static inline bool q_use_random_action(QValue *value) {
+    double epsilon = (value == NULL) ? q_config.epsilon_start : value->epsilon;
+    return q_rand() <= epsilon;
 }
 
 // Takes an observation.
@@ -337,10 +391,10 @@ static QObservation q_observation() {
     return observation;
 }
 
-// Gets a pointer to the Q-value table associated with a replay index, creating the table as necessary if it does not
-// exist and populates it with the correct initial values. This method should only be called by the training thread and
-// not by any evaluation threads.
-static uintptr_t *q_get_table_ptr(uint64_t index) {
+// Gets a pointer to the Q-value associated with a replay index, creating the table as necessary if it does not exist
+// and populates it with the correct initial values. This method should only be called by the training thread and not
+// by any evaluation threads.
+static QValue *q_get_value(uint64_t index) {
     // Fetch the key.
     QObservation observation = q_state.replay[index].observation;
     QKey key = q_create_key(observation.instruction, observation.memory);
@@ -348,11 +402,11 @@ static uintptr_t *q_get_table_ptr(uint64_t index) {
     // It is more efficient to use an upsert here, but we have to get and then upsert because insertion requires a lock
     // on the hashtable. The hope is that we don't have to do this very often, and once the hashtable is initialized,
     // there is not really a need to acquire and release locks.
-    uintptr_t *table_ptr = HTGetCustom(q_state.q_table, q_hash, &key);
+    QValue *value = HTGetCustom(q_state.q_table, q_hash, &key);
 
     // If the key does exist, we are done.
-    if (table_ptr != NULL) {
-        return table_ptr;
+    if (value != NULL) {
+        return value;
     }
 
     // Allocate a new table. All values are initially zero.
@@ -379,14 +433,17 @@ static uintptr_t *q_get_table_ptr(uint64_t index) {
 
     // Do upsert, ignoring duplicate flag.
     bool is_duplicate;
-    HTUpsertCustom(q_state.q_table, q_hash, &key, (void **) &table_ptr, &is_duplicate);
-    *table_ptr = q_tag((uintptr_t) table, tag);
+    HTUpsertCustom(q_state.q_table, q_hash, &key, (void **) &value, &is_duplicate);
+
+    // Set the table and initial epsilon value.
+    value->table = q_tag((uintptr_t) table, tag);
+    value->epsilon = q_config.epsilon_start;
 
     // Release GIL whe insertion is complete.
     PyGILState_Release(gstate);
 
-    // Return the pointer to the table.
-    return table_ptr;
+    // Return the pointer to the value.
+    return value;
 }
 
 // Pushes a frame into replay memory and returns the address of the replay.
@@ -429,16 +486,22 @@ static uint8_t q_max_index(const double *table) {
 }
 
 // Evaluates the policy function and returns the index of the best output. In the case that there are no entries in the
-// Q-table corresponding to the state, then the index of the best value under the default policy is returned.
+// Q-table corresponding to the state, then the index of the best value under the default policy is returned. The
+// epsilon greedy strategy is automatically applied here.
 static uint8_t q_evaluate(QTransition *replay) {
     // Fetch the entry from the hashtable.
     QObservation observation = replay->observation;
     QKey key = q_create_key(observation.instruction, observation.memory);
-    uintptr_t *table_ptr = HTGetCustom(q_state.q_table, q_hash, &key);
+    QValue *value = HTGetCustom(q_state.q_table, q_hash, &key);
+
+    // Determine if we should choose a random action.
+    if (q_use_random_action(value)) {
+        return q_random_action();
+    }
 
     // If the value exists, extract from the bottom two bits.
-    if (table_ptr != NULL) {
-        return *table_ptr & 0x3U;
+    if (value != NULL) {
+        return value->table & 0x3U;
     }
 
     // The value doesn't exist. Therefore, the default policy is to do full collection if we are above the memory
@@ -448,42 +511,6 @@ static uint8_t q_evaluate(QTransition *replay) {
     } else {
         return 0;
     }
-}
-
-// Thresholds for random actions.
-#define THRESHOLD_0 (10.0)
-#define THRESHOLD_1 (10.0)
-#define THRESHOLD_2 (10.0)
-
-// Do not change these below.
-#define THRESHOLD_DENOMINATOR (1.0 + THRESHOLD_2 \
-                                   + THRESHOLD_2 * THRESHOLD_1 \
-                                   + THRESHOLD_2 * THRESHOLD_1 * THRESHOLD_0)
-#define THRESHOLD_0_VAL ((THRESHOLD_2 * THRESHOLD_1 * THRESHOLD_0) / THRESHOLD_DENOMINATOR)
-#define THRESHOLD_1_VAL (THRESHOLD_0_VAL + (THRESHOLD_2 * THRESHOLD_1) / THRESHOLD_DENOMINATOR)
-#define THRESHOLD_2_VAL (THRESHOLD_1_VAL + (THRESHOLD_2) / THRESHOLD_DENOMINATOR)
-
-// Selects a random action from the prior distribution.
-inline static uint8_t q_random_action() {
-    // Indicate that a random action was chosen.
-    q_state.random_actions++;
-
-    // Select from prior distribution.
-    uint64_t r = q_rand();
-    if (r < THRESHOLD_0_VAL * (double) UINT64_MAX) {
-        return 0;
-    } else if (r < THRESHOLD_1_VAL * (double) UINT64_MAX) {
-        return 1;
-    } else if (r < THRESHOLD_2_VAL * (double) UINT64_MAX) {
-        return 2;
-    } else {
-        return 3;
-    }
-}
-
-// Determines whether the epsilon greedy strategy should be used.
-static inline bool q_use_random_action() {
-    return q_rand() <= q_state.epsilon * (double) UINT64_MAX;
 }
 
 // Clears randomization for a hashtable entry.
@@ -508,18 +535,18 @@ static void q_clear_randomization() {
 }
 
 // Trains on a given index in the replay table.
-static void q_train_index(uint64_t index) {
+static void q_train_index(uint64_t index, QTrainingState *state) {
     // Extract values.
     uint8_t action = q_state.replay[index].action;
     double reward = q_state.replay[index].reward;
 
     // Get this table.
-    uintptr_t *table_ptr = q_get_table_ptr(index);
-    double *table = (double *) q_untag(*table_ptr);
+    QValue *value = q_get_value(index);
+    double *table = (double *) q_untag(value->table);
 
     // Get the future table.
-    uintptr_t *future_table_ptr = q_get_table_ptr(q_index(index + 1));
-    double *future_table = (double *) q_untag(*future_table_ptr);
+    QValue *future_value = q_get_value(q_index(index + 1));
+    double *future_table = (double *) q_untag(future_value->table);
 
     // Estimate the optimal future value. Note that we do not use the cached values here, since those could have come
     // from the randomized epsilon-greedy strategy.
@@ -534,7 +561,24 @@ static void q_train_index(uint64_t index) {
     table[action] = y;
 
     // Determine the best action and set the tag bits.
-    *table_ptr = q_tag((uintptr_t) table, q_max_index(table));
+    value->table = q_tag((uintptr_t) table, q_max_index(table));
+
+    // Fetch the key.
+    QObservation observation = q_state.replay[index].observation;
+    QKey key = q_create_key(observation.instruction, observation.memory);
+
+    // Upsert into set.
+    bool seen;
+    void *unused;
+    HTUpsertCustom(state->seen_keys, q_hash, &key, &unused, &seen);
+
+    // If the key has never been seen in this training iteration, decay epsilon.
+    if (!seen) {
+        // Decay by the precomputed factor. This is less accurate than evaluating the exponential directly, but allows
+        // us to save memory and increase performance.
+        double true_epsilon = value->epsilon - q_config.epsilon_end;
+        value->epsilon = q_config.epsilon_end + true_epsilon * q_state.epsilon_factor;
+    }
 }
 
 // Frees a hashtable entry.
@@ -575,12 +619,8 @@ q_predict(struct _gc_runtime_state *state) {
         QObservation observation = q_observation();
         QTransition *replay = q_replay_push(&observation);
 
-        // Determine if we should evaluate of use the epsilon-greedy strategy.
-        uint8_t action = q_use_random_action()
-                ? q_random_action()
-                : q_evaluate(replay);
-
-        // Store the chosen action.
+        // Choose the best action and store it.
+        uint8_t action = q_evaluate(replay);
         replay->action = action;
 
         // Convert to GC action.
@@ -611,6 +651,10 @@ static void *q_train(void *_) {
     // Get the reward.
     double reward = q_state.arg_reward;
 
+    // Create and initialize training state.
+    QTrainingState state;
+    state.seen_keys = HTNew(1024, 0.89, sizeof(QKey), 0);
+
     // Check whether we exceeded the size of the replay table.
     // TODO(bobbyluig): This condition might not be correct.
     if (q_state.replay_index - q_state.last_replay_index >= q_state.replay_capacity) {
@@ -627,7 +671,7 @@ static void *q_train(void *_) {
 
         // Do training on everything in the replay table backwards.
         for (uint64_t i = q_state.replay_index; i != q_state.replay_index - q_state.replay_capacity; i--) {
-            q_train_index(q_index(i));
+            q_train_index(q_index(i), &state);
         }
     } else {
         // Apply reward to new observations.
@@ -644,17 +688,18 @@ static void *q_train(void *_) {
         // Do some training. The replay index is one after the last entry. We start at two before the replay index,
         // which is the second to last entry and therefore has a next entry for future value computation.
         for (uint64_t i = q_state.replay_index - 2; i != end; i--) {
-            q_train_index(q_index(i));
+            q_train_index(q_index(i), &state);
         }
     }
+
+    // Clear training state.
+    HTDestroy(state.seen_keys);
 
     // Set last replay index.
     q_state.last_replay_index = q_state.replay_index;
 
-    // Update the epsilon value in the epsilon-greedy strategy.
-    q_state.evaluations++;
-    q_state.epsilon = q_config.epsilon_end + (q_config.epsilon_start - q_config.epsilon_end)
-                                             * exp(-1.0 * q_state.evaluations / q_config.epsilon_decay);
+    // Increment training counter.
+    q_state.trainings++;
 
     // It's tempting to acquire GIL here before unlocking the table so that we are not in the middle of instruction.
     // However, we don't need to. This increases performance at the expense of the loss of bit of of reward shaping
@@ -721,13 +766,13 @@ _PyGC_Initialize(struct _gc_runtime_state *state)
     q_seed_rand();
 
     // Initialize Q state.
-    q_state.q_table = HTNew(1024, 0.89, sizeof(QKey), sizeof(uintptr_t));
+    q_state.q_table = HTNew(1024, 0.89, sizeof(QKey), sizeof(QValue));
     q_state.replay_capacity = q_config.replay_size / sizeof(QTransition);
     q_state.replay_index = 0;
     q_state.last_replay_index = 0;
     q_state.replay = PyMem_RawMalloc(q_state.replay_capacity * sizeof(QTransition));
-    q_state.evaluations = 0;
-    q_state.epsilon = q_config.epsilon_start;
+    q_state.trainings = 0;
+    q_state.epsilon_factor = exp(-1.0 / q_config.epsilon_decay);
     q_state.objects = 0;
     q_state.random_actions = 0;
     q_state.enabled = false;
