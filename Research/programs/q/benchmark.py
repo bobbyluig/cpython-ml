@@ -35,7 +35,7 @@ def collect(operation, reward):
         gc.reward(r)
 
         # Show how the policy is evolving over time.
-        gc.print_policy()
+        # gc.print_policy()
 
         # Set zero time.
         if zero_time is None:

@@ -380,8 +380,7 @@ static QObservation q_observation() {
     observation.memory = memory_usage;
 
     // Update the instruction location from the thread state.
-    // TODO(bobbyluig): Find a faster way to get the instruction.
-    PyThreadState *ts = PyThreadState_Get();
+    PyThreadState *ts = _PyThreadState_UncheckedGet();
     if (ts->frame != NULL && ts->frame->f_lasti >= 0) {
         observation.instruction = ts->frame->f_code->co_id + ts->frame->f_lasti / sizeof(_Py_CODEUNIT);
     } else {
