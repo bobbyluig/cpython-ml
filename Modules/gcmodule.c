@@ -594,14 +594,14 @@ static void q_print_hashtable_entry(void *key_generic, void *value_generic,
                                     size_t keysize, size_t valsize, void *context) {
     // Get the key and value.
     QKey *key = (QKey *) key_generic;
-    uintptr_t *value = (uintptr_t *) value_generic;
+    QValue *value = (QValue *) value_generic;
 
     // Find the maximum value.
-    uint8_t action = q_max_index((double *) q_untag(*value));
+    uint8_t action = q_max_index((double *) q_untag(value->table));
 
     // Print key and value if the action is to collect.
     if (action > 0) {
-        printf("(%lu, %lu): %u\n", q_key_instruction(*key), q_key_memory(*key), action);
+        printf("(%lu, %lu): %u, %f\n", q_key_instruction(*key), q_key_memory(*key), action, value->epsilon);
     }
 }
 
