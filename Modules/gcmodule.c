@@ -414,6 +414,9 @@ static QValue *q_get_value(uint64_t index) {
     // Define the tag (best policy index).
     uint8_t tag = 0;
 
+    // Define the epsilon value.
+    double epsilon = q_config.epsilon_start;
+
     // If over memory fence, penalize every state except full collection.
     if (observation.memory > q_config.fence_memory) {
         // Apply penalty.
@@ -421,9 +424,11 @@ static QValue *q_get_value(uint64_t index) {
             table[i] -= q_config.fence_penalty;
         }
 
-        // The best index is to do full collection if there is any penalty.
+        // The best index is to do full collection if there is any penalty. Do not use epsilon-greedy strategy on the
+        // memory boundaries.
         if (q_config.fence_penalty > 0) {
             tag = Q_NUM_ACTIONS - 1;
+            epsilon = q_config.epsilon_end;
         }
     }
 
@@ -436,7 +441,7 @@ static QValue *q_get_value(uint64_t index) {
 
     // Set the table and initial epsilon value.
     value->table = q_tag((uintptr_t) table, tag);
-    value->epsilon = q_config.epsilon_start;
+    value->epsilon = epsilon;
 
     // Release GIL whe insertion is complete.
     PyGILState_Release(gstate);
